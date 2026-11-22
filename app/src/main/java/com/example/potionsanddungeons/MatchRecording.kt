@@ -16,7 +16,7 @@ enum class BotStyle {
 }
 
 internal enum class MatchAction {
-    ROLL, ACCEPT, REROLL, CELL, CARD, PLAYER, EFFECT, POTION, D4, BOSS, BOT, ROLL_INLINE
+    ROLL, ACCEPT, REROLL, CELL, CARD, PLAYER, EFFECT, POTION, D4, BOSS, BOT, ROLL_INLINE, TRADE
 }
 
 internal class MatchRecording(
@@ -24,12 +24,15 @@ internal class MatchRecording(
     val bots: Set<Int>,
     val dlc: Boolean,
     private val seed: Int = Random.nextInt(),
-    private val version: Int = 6,
+    private val version: Int = 7,
     private val legacyStyle: BotStyle? = null,
-    val customRules: CustomRules = CustomRules()
+    val customRules: CustomRules = CustomRules(),
+    val dailyDate: String? = null
 ) {
     private val actions = JSONArray()
-    val engine = GameEngine(dlc, Random(seed), animateD4 = true, offerReroll = true, legacyAttackTurns = version == 1, legacyBossCrossing = version < 4, customRules = customRules).apply {
+    private val matchRandom = Random(seed)
+    val engine = GameEngine(dlc, matchRandom, animateD4 = true, offerReroll = true, legacyAttackTurns = version == 1, legacyBossCrossing = version < 4, customRules = customRules,
+        movementRandom = if (dailyDate != null) Random(seed xor 0x345217AC) else matchRandom).apply {
         setupGame(names, bots)
         val tacticRandom = Random(seed.inv())
         players.filter { it.isBot }.forEach { bot ->
@@ -51,6 +54,9 @@ internal class MatchRecording(
             .put("dlc", dlc)
             .put("choicePotions", customRules.choicePotions)
             .put("breakableDoors", customRules.breakableDoors)
+            .put("cardTrading", customRules.cardTrading)
+            .put("bossDuel", customRules.bossDuel)
+            .put("dailyDate", dailyDate)
             .put("style", legacyStyle?.name)
             .put("seed", seed)
             .put("actions", actions)
@@ -61,9 +67,10 @@ internal class MatchRecording(
         fun read(preferences: SharedPreferences): MatchRecording? = runCatching {
             val json = JSONObject(preferences.getString("match", null) ?: return null)
             val version = json.getInt("version")
-            require(version in 1..6)
+            require(version in 1..7)
             val names = json.getJSONArray("names")
             val bots = json.getJSONArray("bots")
+            val date = json.optString("dailyDate").ifEmpty { null }
             val recording = MatchRecording(
                 List(names.length(), names::getString),
                 List(bots.length(), bots::getInt).toSet(),
@@ -71,7 +78,14 @@ internal class MatchRecording(
                 json.getInt("seed"),
                 version,
                 if (version < 3) BotStyle.valueOf(json.getString("style")) else null,
-                CustomRules(json.optBoolean("choicePotions"), json.optBoolean("breakableDoors"))
+                CustomRules(
+                    choicePotions = json.optBoolean("choicePotions"),
+                    breakableDoors = json.optBoolean("breakableDoors"),
+                    cardTrading = json.optBoolean("cardTrading"),
+                    bossDuel = json.optBoolean("bossDuel"),
+                    daily = date != null
+                ),
+                date
             )
             val actions = json.getJSONArray("actions")
             repeat(actions.length()) { index ->
@@ -97,6 +111,15 @@ internal fun GameEngine.applyAction(action: MatchAction, first: Int, second: Int
             choice?.from?.effects?.getOrNull(first)?.let(::resolveEffectChoice)
         }
         MatchAction.POTION -> continueAfterPotion(cleanse = first == 1)
+        MatchAction.TRADE -> {
+            if (first == -1) {
+                finishTrade(null, null, null)
+            } else {
+                val partner = players.getOrNull(first) ?: return 0
+                val cards = CardId.entries
+                finishTrade(partner, cards.getOrNull(second ushr 16), cards.getOrNull(second and 0xffff))
+            }
+        }
         MatchAction.D4 -> finishD4Animation()
         MatchAction.BOSS -> return if (advanceBossStep()) 1 else 0
         MatchAction.BOT -> {

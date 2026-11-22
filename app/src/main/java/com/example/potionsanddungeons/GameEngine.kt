@@ -14,7 +14,7 @@ sealed class PendingChoice {
 
 data class CardRevealEvent(val playerName: String, val card: CardId, val canCleanse: Boolean = false, val bot: Boolean = false)
 
-class GameEngine(private val dlcEnabled: Boolean, private val random: Random = Random, private val animateD4: Boolean = false, private val offerReroll: Boolean = false, private val legacyAttackTurns: Boolean = false, private val legacyBossCrossing: Boolean = false, private val customRules: CustomRules = CustomRules()) {
+class GameEngine(private val dlcEnabled: Boolean, private val random: Random = Random, private val animateD4: Boolean = false, private val offerReroll: Boolean = false, private val legacyAttackTurns: Boolean = false, private val legacyBossCrossing: Boolean = false, private val customRules: CustomRules = CustomRules(), private val movementRandom: Random = random) {
     var awaitingRollDecision by mutableStateOf(false)
         private set
     private var inlineRerollAvailable by mutableStateOf(false)
@@ -46,6 +46,12 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
     private var revealedPotionAction: ((Boolean) -> Unit)? = null
     var doors by mutableStateOf(emptySet<Cell>())
         private set
+    val duelExit: Cell? = CORNERS.first().takeIf { customRules.bossDuel }
+    var duelKeys by mutableStateOf(emptySet<Cell>())
+        private set
+    var tradePartners by mutableStateOf(emptyList<Player>())
+        private set
+    private var considerTrade = false
 
     var bossSpeedBonus by mutableStateOf(0)
     var bossAttackRadiusBonus by mutableStateOf(0)
@@ -83,7 +89,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
     private data class PuppetControl(val target: Player, val steps: Int, val start: Cell)
 
     val hasPendingAction: Boolean
-        get() = d4Rolls.isNotEmpty() || cardReveal != null || pendingChoice != null || pendingCuckoldSteps > 0 || pendingPuppetSteps > 0
+        get() = d4Rolls.isNotEmpty() || cardReveal != null || pendingChoice != null || pendingCuckoldSteps > 0 || pendingPuppetSteps > 0 || tradePartners.isNotEmpty()
 
 
     fun addLog(msg: String) { log.add(msg) }
@@ -110,8 +116,11 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
         afterD4 = null
         d4Rolls.clear()
         turnOrder = emptyList()
-        require(names.size in 2..CORNERS.size)
-        deck = PotionDeck(dlcEnabled, random, customRules.choicePotions)
+        require(if (customRules.bossDuel) names.size == 1 && botSlots.isEmpty() else names.size in 2..CORNERS.size)
+        deck = PotionDeck(dlcEnabled, random, customRules.choicePotions, duel = customRules.bossDuel)
+        duelKeys = if (customRules.bossDuel) CORNERS.drop(1).toSet() else emptySet()
+        tradePartners = emptyList()
+        considerTrade = false
         doors = if (customRules.breakableDoors) setOf(Cell(2, 1), Cell(2, 3)) else emptySet()
         cornerDecks = assignCornerDecks(dlcEnabled, random)
 
@@ -311,7 +320,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
         }
 
         val sides = diceSidesForCurrentPlayer()
-        lastDiceRoll = if (tutorial) 1 else random.nextInt(1, sides + 1)
+        lastDiceRoll = if (tutorial) 1 else movementRandom.nextInt(1, sides + 1)
         addLog("${current.name} бросил кубик: $lastDiceRoll")
         val eligible = offerReroll && !current.isBot && !current.rerollUsed &&
             (waitForAcceptance || !attackCardPlayed)
@@ -334,7 +343,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
         inlineRerollAvailable = false
         if (reroll) {
             current.rerollUsed = true
-            lastDiceRoll = random.nextInt(1, diceSidesForCurrentPlayer() + 1)
+            lastDiceRoll = movementRandom.nextInt(1, diceSidesForCurrentPlayer() + 1)
             addLog("${current.name} перебросил кубик: $lastDiceRoll")
         }
         return applyDiceRoll(current)
@@ -458,9 +467,20 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
 
     private fun resolveFinalLanding(player: Player) {
         if (checkGameEnd()) return
+        if (player.position in duelKeys) {
+            duelKeys = duelKeys - player.position
+            addLog("${player.name} подобрал ключ (${3 - duelKeys.size}/3)")
+        }
+        if (duelExit == player.position && duelKeys.isEmpty()) {
+            statusText = "Все ключи собраны. Ты выбрался!"
+            gameOver = true
+            clearPendingActions()
+            return
+        }
         checkWerewolfKill(player)
         if (checkGameEnd()) return
         deferredDaun = player.takeIf { it.effects.has(CardId.DAUN) }
+        considerTrade = customRules.cardTrading && !customRules.bossDuel && !player.isBot
         checkPotionAt(player)
         finishTurnWhenReady()
     }
@@ -633,7 +653,36 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
             }
         }
         turnCompletionPending = hasPendingAction
-        if (!turnCompletionPending) nextTurn()
+        if (turnCompletionPending) return
+        if (considerTrade) {
+            considerTrade = false
+            val current = turnOrder[currentTurnIndex]
+            if (!turnRewound && current.activeCards.isNotEmpty()) {
+                tradePartners = players.filter { target ->
+                    target !== current && target.alive && !target.isBot &&
+                        target.activeCards.isNotEmpty() && manhattan(current.position, target.position) == 1
+                }
+            }
+            if (tradePartners.isNotEmpty()) return
+        }
+        nextTurn()
+    }
+
+    internal fun finishTrade(partner: Player?, offered: CardId?, requested: CardId?) {
+        if (tradePartners.isEmpty()) return
+        val current = turnOrder[currentTurnIndex]
+        if (partner != null) {
+            if (partner !in tradePartners || offered == null || requested == null ||
+                offered !in current.activeCards || requested !in partner.activeCards
+            ) return
+            current.activeCards.remove(offered)
+            partner.activeCards.remove(requested)
+            current.activeCards.add(requested)
+            partner.activeCards.add(offered)
+            addLog("${current.name} и ${partner.name} обменялись картами «${offered.displayName()}» и «${requested.displayName()}»")
+        }
+        tradePartners = emptyList()
+        nextTurn()
     }
 
     fun requestChooseCell(prompt: String, allowed: (Cell) -> Boolean, onChosen: (Cell) -> Unit) {
@@ -1050,15 +1099,16 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
     }
 
     private fun checkGameEnd(): Boolean {
+        if (gameOver) return true
         val alive = players.filter { it.alive }
-        if (alive.size == 1) {
+        if (alive.size == 1 && !customRules.bossDuel) {
             statusText = "Победитель: ${alive[0].name}!"
             gameOver = true
             clearPendingActions()
             return true
         }
         if (alive.isEmpty()) {
-            statusText = "Ничья — все игроки погибли одновременно"
+            statusText = if (customRules.bossDuel) "Босс настиг тебя" else "Ничья — все игроки погибли одновременно"
             gameOver = true
             clearPendingActions()
             return true
@@ -1075,6 +1125,8 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
         puppetTarget = null
         puppetStart = null
         suspendedPuppets.clear()
+        tradePartners = emptyList()
+        considerTrade = false
         awaitingBossMove = false
         turnCompletionPending = false
         deferredDaun = null

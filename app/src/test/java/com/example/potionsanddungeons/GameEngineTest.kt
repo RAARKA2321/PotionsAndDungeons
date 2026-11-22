@@ -6,6 +6,73 @@ import org.junit.Test
 
 class GameEngineTest {
     @Test
+    fun duelEndsOnlyAfterCollectingAllKeysAndReturningToTheExit() {
+        val engine = GameEngine(false, Random(1), customRules = CustomRules(bossDuel = true))
+        engine.setupGame(listOf("А"))
+        engine.potions = emptyList()
+        val player = engine.players.single()
+        assertFalse(engine.gameOver)
+        assertEquals(3, engine.duelKeys.size)
+        fun landOn(cell: Cell) {
+            player.position = Cell(cell.row, if (cell.col == 0) 1 else cell.col - 1)
+            engine.pendingSteps = 1
+            engine.lastDirection = null
+            engine.handleCellClick(cell)
+        }
+        landOn(checkNotNull(engine.duelExit))
+        assertFalse(engine.gameOver)
+        engine.duelKeys.toList().forEach { key ->
+            engine.bosses.single().stunnedTurns = 1
+            engine.triggerBossMove()
+            landOn(key)
+        }
+        assertFalse(engine.gameOver)
+        engine.bosses.single().stunnedTurns = 1
+        engine.triggerBossMove()
+        landOn(checkNotNull(engine.duelExit))
+        assertTrue(engine.gameOver)
+    }
+
+    @Test
+    fun separateMovementDiceKeepsRollsStableWhenCardRollsDiffer() {
+        fun newAttempt() = GameEngine(false, Random(28), movementRandom = Random(41)).apply {
+            setupGame(listOf("А", "Б"))
+        }
+        val first = newAttempt()
+        val second = newAttempt()
+        assertEquals(first.potions.map { it.cardId }, second.potions.map { it.cardId })
+        second.withD4 { }
+        second.withD4 { }
+        assertEquals(first.rollDiceForCurrentPlayer(), second.rollDiceForCurrentPlayer())
+        assertEquals(first.lastDiceRoll, second.lastDiceRoll)
+    }
+
+    @Test
+    fun neighboringPlayersCanTradeOneCardEachAndThenFinishTheTurn() {
+        val engine = GameEngine(false, Random(1), customRules = CustomRules(cardTrading = true))
+        engine.setupCardSandbox()
+        engine.potions = emptyList()
+        val (trader, partner) = engine.players
+        trader.position = Cell(0, 1)
+        trader.activeCards.add(CardId.ATTACK)
+        partner.activeCards.add(CardId.TARAN)
+        engine.pendingSteps = 1
+        engine.handleCellClick(Cell(0, 0))
+        assertTrue(engine.tradePartners.isEmpty())
+        assertEquals(partner, engine.turnOrder[engine.currentTurnIndex])
+
+        partner.position = Cell(0, 2)
+        engine.pendingSteps = 1
+        engine.handleCellClick(Cell(0, 1))
+        assertEquals(listOf(trader), engine.tradePartners)
+        engine.finishTrade(trader, CardId.TARAN, CardId.ATTACK)
+        assertEquals(listOf(CardId.TARAN), trader.activeCards)
+        assertEquals(listOf(CardId.ATTACK), partner.activeCards)
+        assertTrue(engine.tradePartners.isEmpty())
+        assertTrue(engine.awaitingBossMove)
+    }
+
+    @Test
     fun choicePotionCanClearAnEffectOrGrantItsReward() {
         val engine = GameEngine(false, Random(1))
         engine.setupCardSandbox()

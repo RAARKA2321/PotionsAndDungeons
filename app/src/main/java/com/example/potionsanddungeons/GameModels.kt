@@ -127,7 +127,13 @@ enum class CardId(val isDlc: Boolean, val isActive: Boolean = false, val display
         }
 }
 
-data class CustomRules(val choicePotions: Boolean = false, val breakableDoors: Boolean = false)
+data class CustomRules(
+    val choicePotions: Boolean = false,
+    val breakableDoors: Boolean = false,
+    val cardTrading: Boolean = false,
+    val bossDuel: Boolean = false,
+    val daily: Boolean = false
+)
 
 fun CardId.displayName() = display
 
@@ -165,7 +171,7 @@ fun MutableList<ActiveEffect>.get(id: CardId) = find { it.id == id }
 
 // ---------- Колода ----------
 
-class PotionDeck(val dlcEnabled: Boolean, private val random: Random = Random, choicePotions: Boolean = false) {
+class PotionDeck(val dlcEnabled: Boolean, private val random: Random = Random, choicePotions: Boolean = false, duel: Boolean = false) {
     private val baseDraw = mutableListOf<CardId>()
     private val baseDiscard = mutableListOf<CardId>()
     private val dlcDraw = mutableListOf<CardId>()
@@ -173,8 +179,10 @@ class PotionDeck(val dlcEnabled: Boolean, private val random: Random = Random, c
 
     init {
         CARD_QUANTITIES.forEach { (card, qty) ->
-            if (!card.isDlc) repeat(qty) { baseDraw.add(card) }
-            else if (dlcEnabled) repeat(qty) { dlcDraw.add(card) }
+            if (!duel || card !in duelExcludedCards) {
+                if (!card.isDlc) repeat(qty) { baseDraw.add(card) }
+                else if (dlcEnabled) repeat(qty) { dlcDraw.add(card) }
+            }
         }
         if (choicePotions) repeat(2) {
             baseDraw.add(CardId.CHOICE_SHIELD)
@@ -199,6 +207,8 @@ class PotionDeck(val dlcEnabled: Boolean, private val random: Random = Random, c
         if (card.isDlc) dlcDiscard.add(card) else baseDiscard.add(card)
     }
 }
+
+private val duelExcludedCards = setOf(CardId.BODY_SWAP, CardId.EFFECT_SWAP, CardId.BFF, CardId.PUPPETEER, CardId.THIEF, CardId.WEREWOLF)
 
 data class CornerAssignment(val corner: Cell, val source: DeckSource)
 

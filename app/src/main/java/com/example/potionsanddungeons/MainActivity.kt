@@ -191,8 +191,17 @@ class GameSession : ViewModel() {
         }
     }
 
-    fun startMatch(names: List<String>, bots: Set<Int>, dlc: Boolean, customRules: CustomRules) {
-        val match = MatchRecording(names, bots, dlc, customRules = customRules)
+    fun startMatch(
+        names: List<String>, bots: Set<Int>, dlc: Boolean, customRules: CustomRules, repeatDaily: Boolean = false
+    ) {
+        val date = if (customRules.daily) {
+            (if (repeatDaily) recording?.dailyDate else null)
+                ?: java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).format(java.util.Date())
+        } else null
+        val match = MatchRecording(
+            names, bots, dlc, seed = date?.hashCode() ?: kotlin.random.Random.nextInt(),
+            customRules = customRules, dailyDate = date
+        )
         recording = match
         lastNames = names
         botSlots = bots
@@ -255,7 +264,7 @@ fun RootScreen(session: GameSession) = with(session) {
                 GameScreen(
                     currentEngine,
                     onRestart = {
-                        startMatch(lastNames, botSlots, activeDlc, activeCustomRules)
+                        startMatch(lastNames, botSlots, activeDlc, activeCustomRules, repeatDaily = true)
                     },
                     onOpenSettings = { gameStarted = false }
                 )
@@ -297,6 +306,10 @@ fun SetupScreen(
     var customParty by rememberSaveable { mutableStateOf(false) }
     var choicePotions by rememberSaveable { mutableStateOf(false) }
     var breakableDoors by rememberSaveable { mutableStateOf(false) }
+    var cardTrading by rememberSaveable { mutableStateOf(false) }
+    var bossDuel by rememberSaveable { mutableStateOf(false) }
+    var daily by rememberSaveable { mutableStateOf(false) }
+    val solo = customParty && bossDuel
     var showCatalog by remember { mutableStateOf(false) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val version = remember(context) { context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty() }
@@ -361,8 +374,11 @@ fun SetupScreen(
             FilterChip(selected = customParty, onClick = { customParty = true }, label = { Text("Кастомная партия") })
         }
         if (customParty) {
+            CustomRuleSwitch("Дуэль с боссом", bossDuel) { bossDuel = it }
             CustomRuleSwitch("Зелья с выбором", choicePotions) { choicePotions = it }
             CustomRuleSwitch("Разрушаемые двери", breakableDoors) { breakableDoors = it }
+            if (!solo) CustomRuleSwitch("Обмен картами", cardTrading) { cardTrading = it }
+            CustomRuleSwitch("Партия дня", daily) { daily = it }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Дополнительные зелья (DLC)", color = AppColors.textPrimary, fontSize = AppFonts.sectionLabel, modifier = Modifier.weight(1f, fill = false))
@@ -374,6 +390,7 @@ fun SetupScreen(
             )
         }
 
+        if (!solo) {
         Spacer(Modifier.height(24.dp))
         Text("Сколько игроков?", color = AppColors.textPrimary, fontSize = AppFonts.sectionLabel)
         Spacer(Modifier.height(8.dp))
@@ -397,6 +414,7 @@ fun SetupScreen(
                 FilterChip(selected = botCount == count, onClick = { botCount = count }, label = { Text("$count") })
             }
         }
+        }
         Button(onClick = { setupPage = 2 }, modifier = Modifier.fillMaxWidth()) { Text("Далее") }
         }
 
@@ -406,14 +424,15 @@ fun SetupScreen(
         Spacer(Modifier.height(4.dp))
         Text("Цвет каждого игрока на доске совпадает с порядком ниже", color = AppColors.textMuted, fontSize = AppFonts.hint)
         Spacer(Modifier.height(8.dp))
-        for (i in 0 until playerCount) {
+        val participants = if (solo) 1 else playerCount
+        for (i in 0 until participants) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                 Box(modifier = Modifier.size(16.dp).background(playerPalette[i % playerPalette.size], shape = CircleShape))
                 Spacer(Modifier.width(8.dp))
                 OutlinedTextField(
                     value = names[i],
                     onValueChange = { newValue -> names = names.mapIndexed { index, name -> if (index == i) newValue else name } },
-                    label = { Text(if (i >= playerCount - botCount) "Имя бота ${i + 1}" else "Имя игрока ${i + 1}", fontSize = AppFonts.hint) },
+                    label = { Text(if (!solo && i >= playerCount - botCount) "Имя бота ${i + 1}" else "Имя игрока ${i + 1}", fontSize = AppFonts.hint) },
                     textStyle = androidx.compose.ui.text.TextStyle(fontSize = AppFonts.dialogBody, color = AppColors.textPrimary),
                     singleLine = true,
                     colors = OutlinedTextFieldDefaults.colors(
@@ -433,9 +452,12 @@ fun SetupScreen(
         Spacer(Modifier.height(24.dp))
         Button(
             onClick = {
-                val finalNames = (0 until playerCount).map { i -> names[i].ifBlank { "Игрок ${i + 1}" } }
-                val rules = if (customParty) CustomRules(choicePotions, breakableDoors) else CustomRules()
-                onStart(finalNames, (playerCount - botCount until playerCount).toSet(), rules)
+                val finalNames = (0 until participants).map { i -> names[i].ifBlank { "Игрок ${i + 1}" } }
+                val rules = if (customParty) {
+                    CustomRules(choicePotions, breakableDoors, cardTrading && !solo, solo, daily)
+                } else CustomRules()
+                val bots = if (solo) emptySet() else (playerCount - botCount until playerCount).toSet()
+                onStart(finalNames, bots, rules)
             },
             colors = ButtonDefaults.buttonColors(containerColor = AppColors.accent, contentColor = AppColors.darkTextOnAccent)
         ) { Text("Начать игру", fontSize = AppFonts.buttonText) }
@@ -575,6 +597,13 @@ fun GameScreen(engine: GameEngine, onRestart: () -> Unit, onOpenSettings: () -> 
             }
             Spacer(Modifier.height(8.dp))
             TurnGuide(engine)
+            if (engine.duelExit != null && !engine.gameOver) {
+                Text(
+                    if (engine.duelKeys.isEmpty()) "Все ключи собраны. Закончи движение на выходе."
+                    else "Ключи: ${3 - engine.duelKeys.size}/3 · закончи движение на клетке с ключом.",
+                    fontSize = AppFonts.hint, color = AppColors.textMuted
+                )
+            }
             if (tutorialFinished) {
                 Button(onClick = onOpenSettings) { Text("Завершить обучение") }
             }
@@ -697,6 +726,12 @@ fun GameScreen(engine: GameEngine, onRestart: () -> Unit, onOpenSettings: () -> 
     (engine.pendingChoice as? PendingChoice.ChooseEffect)?.takeUnless { botTurn }?.let { choice ->
         EffectChoiceDialog(choice, onEffectSelected = { effect -> perform(MatchAction.EFFECT, choice.from.effects.indexOf(effect), 0) })
     }
+    if (engine.tradePartners.isNotEmpty()) {
+        val trader = engine.turnOrder[engine.currentTurnIndex]
+        TradeDialog(trader, engine.tradePartners, onCancel = { perform(MatchAction.TRADE, -1, 0) }) { partner, offered, requested ->
+            perform(MatchAction.TRADE, engine.players.indexOf(partner), (offered.ordinal shl 16) or requested.ordinal)
+        }
+    }
     engine.cardReveal?.let { event ->
         if (event.bot && event.card.choiceReward != null) {
             LaunchedEffect(event) {
@@ -709,6 +744,55 @@ fun GameScreen(engine: GameEngine, onRestart: () -> Unit, onOpenSettings: () -> 
             }
         }
     }
+}
+
+@Composable
+private fun TradeDialog(
+    trader: Player,
+    partners: List<Player>,
+    onCancel: () -> Unit,
+    onTrade: (Player, CardId, CardId) -> Unit
+) {
+    var partner by remember(partners) { mutableStateOf(partners.singleOrNull()) }
+    var offered by remember(partners) { mutableStateOf<CardId?>(null) }
+    var requested by remember(partners) { mutableStateOf<CardId?>(null) }
+    var offeredToPartner by remember(partners) { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text(if (offeredToPartner) "${partner?.name}, принять обмен?" else "Обмен картами") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                if (offeredToPartner) {
+                    Text("Получишь «${offered?.displayName()}», отдашь «${requested?.displayName()}».")
+                } else {
+                    Text("С кем обменяться?")
+                    partners.forEach { candidate ->
+                        FilterChip(selected = partner === candidate, onClick = {
+                            if (partner !== candidate) requested = null
+                            partner = candidate
+                        }, label = { Text(candidate.name) })
+                    }
+                    Text("Что отдать?")
+                    trader.activeCards.distinct().forEach { card ->
+                        FilterChip(selected = offered == card, onClick = { offered = card }, label = { Text(card.displayName()) })
+                    }
+                    partner?.let { target ->
+                        Text("Что попросить?")
+                        target.activeCards.distinct().forEach { card ->
+                            FilterChip(selected = requested == card, onClick = { requested = card }, label = { Text(card.displayName()) })
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = partner != null && offered != null && requested != null, onClick = {
+                if (offeredToPartner) onTrade(checkNotNull(partner), checkNotNull(offered), checkNotNull(requested))
+                else offeredToPartner = true
+            }) { Text(if (offeredToPartner) "Принять" else "Предложить") }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text(if (offeredToPartner) "Отказаться" else "Пропустить") } }
+    )
 }
 
 @Composable
@@ -963,6 +1047,8 @@ fun BoardView(engine: GameEngine, attackPreview: Pair<Player, CardId>? = null, i
                         (!engine.tutorial || if (engine.pendingChoice != null) engine.bosses.any { it.position == cell } else engine.attackCardPlayed || cell == Cell(0, 1))
                     val dangerous = cell in attackZone
                     val door = cell in engine.doors
+                    val duelKey = cell in engine.duelKeys
+                    val duelExit = cell == engine.duelExit
                     val potion = engine.potions.firstOrNull { it.position == cell }
                     val shape = RoundedCornerShape(6.dp)
                     val lastStep = selectable && !engine.hasPendingAction &&
@@ -989,6 +1075,8 @@ fun BoardView(engine: GameEngine, attackPreview: Pair<Player, CardId>? = null, i
                                 contentDescription = buildString {
                                     append("Ряд ${r + 1}, столбец ${c + 1}")
                                     if (door) append(", закрытая дверь")
+                                    if (duelKey) append(", ключ")
+                                    if (duelExit) append(", выход")
                                     if (dangerous) append(", зона атаки")
                                     if (risky) append(", босс может достать в конце раунда")
                                     if (cell in engine.bananaPeels) append(", кожурка")
@@ -999,6 +1087,9 @@ fun BoardView(engine: GameEngine, attackPreview: Pair<Player, CardId>? = null, i
                             .clickable(enabled = selectable) { perform(MatchAction.CELL, cell.row, cell.col) }
                     ) {
                         if (door) Text("🚪", modifier = Modifier.align(Alignment.Center))
+                        if (duelKey || duelExit) {
+                            Text(if (duelKey) "🔑" else "🚩", modifier = Modifier.align(Alignment.BottomStart))
+                        }
                         if (risky) Text("!", color = Color(0xFFFFA5A5), fontWeight = FontWeight.Bold,
                             modifier = Modifier.align(Alignment.TopEnd).padding(end = 4.dp))
                     }

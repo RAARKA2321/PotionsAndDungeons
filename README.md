@@ -1,5 +1,26 @@
 # PotionsAndDungeons
 
+## Версия для Windows
+
+Распакуй ZIP целиком и запусти `PotionsAndDungeons.exe`. Среда Java входит в архив. Сохранения и настройки находятся в `%LOCALAPPDATA%\PotionsAndDungeons`.
+
+Для сетевой игры с Android используй один и тот же режим на обоих устройствах. Например, в режиме VPN оба устройства подключаются к одной сети Tailscale, а гость вводит VPN IPv4 ведущего и код комнаты.
+
+### Сборка для ПК
+
+Для запуска из исходников нужен JDK 21. В PowerShell из корня проекта:
+
+```powershell
+.\gradlew.bat -p desktop run
+```
+
+Для переносимого архива Windows x64 нужны Go, zip и распакованная Windows x64 JRE 21:
+
+```sh
+bash gradlew -p desktop installDist -PdesktopTarget=windows
+bash desktop/pack-windows.sh /path/to/windows-jre PotionsAndDungeons-Windows-x64.zip
+```
+
 ## Игра через VPN
 
 Подключите все устройства к одной VPN-сети (например, Tailscale) и откройте **Сетевая игра → VPN**. Ведущий копирует свой IPv4-адрес из VPN-приложения, вводит его и создаёт комнату. Остальные вводят VPN IPv4 ведущего и шестизначный код комнаты.

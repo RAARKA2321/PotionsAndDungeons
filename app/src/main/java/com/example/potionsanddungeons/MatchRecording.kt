@@ -1,6 +1,5 @@
 package com.example.potionsanddungeons
 
-import android.content.SharedPreferences
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.random.Random
@@ -59,13 +58,9 @@ internal class MatchRecording(
             .put("style", legacyStyle?.name)
             .put("seed", seed)
             .put("actions", actions)
-    fun save(preferences: SharedPreferences) {
-        preferences.edit().putString("match", snapshot().toString()).apply()
-    }
-
     companion object {
-        fun read(preferences: SharedPreferences): MatchRecording? =
-            preferences.getString("match", null)?.let { runCatching { restore(JSONObject(it)) }.getOrNull() }
+        fun read(saved: String?): MatchRecording? =
+            saved?.let { runCatching { restore(JSONObject(it)) }.getOrNull() }
 
         fun restore(json: JSONObject): MatchRecording {
             val version = json.getInt("version")

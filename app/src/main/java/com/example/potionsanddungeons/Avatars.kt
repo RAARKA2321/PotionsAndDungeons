@@ -1,13 +1,5 @@
 package com.example.potionsanddungeons
 
-import android.content.Intent
-import android.graphics.BitmapFactory
-import android.graphics.ImageDecoder
-import android.os.Build
-import android.net.Uri
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.compose.BackHandler
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.background
@@ -22,7 +14,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.IntOffset
@@ -30,10 +21,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.runtime.saveable.rememberSaveable
 import kotlin.math.min
 import kotlin.math.roundToInt
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 internal val LocalAvatars = compositionLocalOf<Map<String, String>> { emptyMap() }
 
@@ -58,42 +46,6 @@ private data class AvatarCrop(
         val horizontal = halfSide / bitmap.width
         val vertical = halfSide / bitmap.height
         return copy(x = x.coerceIn(horizontal, 1f - horizontal), y = y.coerceIn(vertical, 1f - vertical))
-    }
-}
-
-@Composable
-private fun loadAvatar(uri: String, maxDimension: Int): State<ImageBitmap?> {
-    val context = LocalContext.current
-    return produceState<ImageBitmap?>(null, uri, maxDimension) {
-        value = null
-        value = withContext(Dispatchers.IO) {
-            runCatching {
-                val resolver = context.contentResolver
-                val source = Uri.parse(uri)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    ImageDecoder.decodeBitmap(ImageDecoder.createSource(resolver, source)) { decoder, info, _ ->
-                        decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                        val largest = maxOf(info.size.width, info.size.height)
-                        if (largest > maxDimension) {
-                            val scale = maxDimension.toFloat() / largest
-                            decoder.setTargetSize(
-                                (info.size.width * scale).roundToInt().coerceAtLeast(1),
-                                (info.size.height * scale).roundToInt().coerceAtLeast(1)
-                            )
-                        }
-                    }.asImageBitmap()
-                } else {
-                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    resolver.openInputStream(source).use { BitmapFactory.decodeStream(it, null, bounds) }
-                    val options = BitmapFactory.Options().apply {
-                        while (maxOf(bounds.outWidth, bounds.outHeight) / inSampleSize.coerceAtLeast(1) > maxDimension) {
-                            inSampleSize = inSampleSize.coerceAtLeast(1) * 2
-                        }
-                    }
-                    resolver.openInputStream(source).use { BitmapFactory.decodeStream(it, null, options)?.asImageBitmap() }
-                }
-            }.getOrNull()
-        }
     }
 }
 
@@ -188,17 +140,15 @@ private fun AvatarCropDialog(
 internal fun AvatarSettings(onDismiss: () -> Unit, colors: DiceColors, onColorsChanged: (DiceColors) -> Unit, onChanged: (String, String?) -> Unit) {
     BackHandler(onBack = onDismiss)
     var section by rememberSaveable { mutableIntStateOf(0) }
-    val context = LocalContext.current
     var selected by rememberSaveable { mutableStateOf("player0") }
     var error by remember { mutableStateOf<String?>(null) }
     var pendingCrop by rememberSaveable { mutableStateOf<String?>(null) }
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) pendingCrop = AvatarCrop(uri.toString()).encode()
-    }
+    val pickPhoto = rememberAvatarPicker { path -> pendingCrop = AvatarCrop(path).encode() }
+    val retainPhoto = rememberAvatarPermission()
     pendingCrop?.let { saved ->
         AvatarCropDialog(AvatarCrop.decode(saved), onDismiss = { pendingCrop = null }) { crop ->
             runCatching {
-                context.contentResolver.takePersistableUriPermission(Uri.parse(crop.uri), Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                retainPhoto(crop.uri)
                 onChanged(selected, crop.encode())
                 error = null
             }.onFailure { error = "Не удалось сохранить фото. Выбери его ещё раз." }
@@ -228,7 +178,7 @@ internal fun AvatarSettings(onDismiss: () -> Unit, colors: DiceColors, onColorsC
                     val saved = LocalAvatars.current[key]
                     Column(Modifier.weight(1f)) {
                         Text(if (index == 4) "Босс" else "Игрок ${index+1}",fontWeight=FontWeight.Bold)
-                        TextButton(onClick = { selected = key; picker.launch(arrayOf("image/*")) }) { Text("Выбрать фото") }
+                        TextButton(onClick = { selected = key; pickPhoto() }) { Text("Выбрать фото") }
                         if (saved != null) {
                             TextButton(onClick = { selected = key; pendingCrop = saved }) { Text("Настроить кадр") }
                         }

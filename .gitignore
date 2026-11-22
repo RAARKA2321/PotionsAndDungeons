@@ -13,3 +13,6 @@
 .externalNativeBuild
 .cxx
 local.properties
+/desktop/build
+/desktop/.kotlin
+/desktop/.gradle

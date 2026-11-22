@@ -16,8 +16,8 @@ android {
         applicationId = "com.example.potionsanddungeons"
         minSdk = 24
         targetSdk = 37
-        versionCode = 8
-        versionName = "1.5.0"
+        versionCode = 12
+        versionName = "1.5.5"
         buildConfigField("String", "RELAY_ENDPOINT", "\"$relayEndpoint\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

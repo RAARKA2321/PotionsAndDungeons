@@ -10,6 +10,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.dp
 
 internal val LocalDiceColors = compositionLocalOf { DiceColors() }
@@ -39,7 +40,7 @@ internal fun shadedDiceColor(color: Color, brightness: Float): Color =
     Color(color.red*brightness, color.green*brightness, color.blue*brightness, 1f)
 
 internal fun diceNumberColor(color: Color): Int =
-    if (color.luminance() > 0.45f) android.graphics.Color.rgb(25,41,56) else android.graphics.Color.WHITE
+    if (color.luminance() > 0.45f) Color(0xFF192938).toArgb() else Color.White.toArgb()
 
 @Composable
 internal fun DiceColorSettings(colors: DiceColors, onChange: (DiceColors) -> Unit) {
@@ -104,10 +105,8 @@ internal fun DiceColorSettings(colors: DiceColors, onChange: (DiceColors) -> Uni
 
 @Composable
 private fun CustomDiceColorDialog(initial: Color, onDismiss: () -> Unit, onApply: (Color) -> Unit) {
-    val hsv = remember {
-        FloatArray(3).also { android.graphics.Color.RGBToHSV(
-            (initial.red*255).toInt(),(initial.green*255).toInt(),(initial.blue*255).toInt(),it
-        ) }
+    val hsv = remember(initial) {
+        rgbToHsv((initial.red * 255).toInt(), (initial.green * 255).toInt(), (initial.blue * 255).toInt())
     }
     var hue by remember { mutableFloatStateOf(hsv[0]) }
     var saturation by remember { mutableFloatStateOf(hsv[1]) }

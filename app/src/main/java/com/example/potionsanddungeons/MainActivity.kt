@@ -166,6 +166,8 @@ class GameSession : ViewModel() {
     var tutorialEngine by mutableStateOf<GameEngine?>(null)
     var sandboxEngine by mutableStateOf<GameEngine?>(null)
         private set
+    internal var lanRoom by mutableStateOf<LanRoom?>(null)
+        private set
     private lateinit var saves: android.content.SharedPreferences
     private var recording: MatchRecording? = null
 
@@ -175,6 +177,20 @@ class GameSession : ViewModel() {
 
     fun closeCardSandbox() {
         sandboxEngine = null
+    }
+
+    fun openLanRoom() {
+        lanRoom = LanRoom()
+    }
+
+    fun closeLanRoom() {
+        lanRoom?.close()
+        lanRoom = null
+    }
+
+    override fun onCleared() {
+        closeLanRoom()
+        super.onCleared()
     }
 
     fun attach(preferences: android.content.SharedPreferences) {
@@ -213,6 +229,7 @@ class GameSession : ViewModel() {
     }
 
     internal fun perform(engine: GameEngine, action: MatchAction, first: Int, second: Int): Int {
+        lanRoom?.takeIf { it.engine === engine }?.let { return it.perform(action, first, second) }
         val match = recording?.takeIf { it.engine === engine }
         if (match == null) return engine.applyAction(action, first, second)
         val result = match.perform(action, first, second)
@@ -240,7 +257,19 @@ fun RootScreen(session: GameSession) = with(session) {
     Box {
     val lesson = tutorialEngine
     val sandbox = sandboxEngine
-    if (sandbox != null) {
+    val room = lanRoom
+    if (room != null) {
+        val onlineGame = room.engine
+        if (onlineGame == null) {
+            BackHandler { closeLanRoom() }
+            LanLobby(room, onBack = ::closeLanRoom)
+        } else {
+            BackHandler { closeLanRoom() }
+            key(onlineGame) {
+                GameScreen(onlineGame, onRestart = ::closeLanRoom, onOpenSettings = ::closeLanRoom, lan = room)
+            }
+        }
+    } else if (sandbox != null) {
         BackHandler { closeCardSandbox() }
         key(sandbox) {
             GameScreen(sandbox, onRestart = ::openCardSandbox, onOpenSettings = ::closeCardSandbox, cardSandbox = true)
@@ -256,6 +285,7 @@ fun RootScreen(session: GameSession) = with(session) {
             initialBotCount = botSlots.size,
             onTutorial = { tutorialEngine = GameEngine(true).apply { setupTutorial() } },
             onOpenCardSandbox = ::openCardSandbox,
+            onOpenLan = ::openLanRoom,
             onStart = { names, bots, rules -> startMatch(names, bots, dlcEnabled, rules) }
         )
     } else {
@@ -271,7 +301,7 @@ fun RootScreen(session: GameSession) = with(session) {
             }
         }
     }
-    if (sandbox == null) {
+    if (sandbox == null && room == null) {
         TextButton(onClick = { showAvatars = true }, modifier = Modifier.align(Alignment.BottomEnd)) { Text("Оформление") }
     }
     }
@@ -297,6 +327,7 @@ fun SetupScreen(
     initialBotCount: Int,
     onTutorial: () -> Unit,
     onOpenCardSandbox: () -> Unit,
+    onOpenLan: () -> Unit,
     onStart: (List<String>, Set<Int>, CustomRules) -> Unit
 ) {
     val entrance = remember { Animatable(0f) }
@@ -357,6 +388,7 @@ fun SetupScreen(
             Button(onClick = onResume, modifier = Modifier.fillMaxWidth()) { Text("Продолжить партию") }
         }
         Button(onClick = { setupPage = 1 }, modifier = Modifier.fillMaxWidth()) { Text("Новая игра") }
+        OutlinedButton(onClick = onOpenLan, modifier = Modifier.fillMaxWidth()) { Text("Игра по Wi‑Fi") }
         TextButton(onClick = { showCatalog = true }) { Text("Справочник зелий") }
         TextButton(onClick = {
             versionTaps++
@@ -485,7 +517,10 @@ private fun matchActions(engine: GameEngine): (MatchAction, Int, Int) -> Int {
 }
 
 @Composable
-fun GameScreen(engine: GameEngine, onRestart: () -> Unit, onOpenSettings: () -> Unit, cardSandbox: Boolean = false) {
+internal fun GameScreen(
+    engine: GameEngine, onRestart: () -> Unit, onOpenSettings: () -> Unit,
+    cardSandbox: Boolean = false, lan: LanRoom? = null
+) {
     val entrance = remember { Animatable(0f) }
     LaunchedEffect(Unit) { entrance.animateTo(1f, tween(400)) }
 
@@ -517,7 +552,26 @@ fun GameScreen(engine: GameEngine, onRestart: () -> Unit, onOpenSettings: () -> 
     }
 
     val perform = matchActions(engine)
+    val localInput = lan?.canAct ?: true
+    val driveGame = lan == null
+    val lanRoll = lan?.lastRoll
+    LaunchedEffect(lanRoll) {
+        if (lanRoll != null) {
+            diceResult = -1
+            diceSides = lanRoll.sides
+            diceCaption = null
+            diceVisible = true
+            delay(900)
+            diceResult = lanRoll.value
+            delay(700)
+            diceVisible = false
+        }
+    }
     fun rollWithAnimation(reroll: Boolean = false) {
+        if (lan != null) {
+            perform(if (reroll) MatchAction.REROLL else MatchAction.ROLL_INLINE, 0, 0)
+            return
+        }
         val player = engine.turnOrder.getOrNull(engine.currentTurnIndex)
         if (engine.mustSkipCurrentTurn() || player?.effects?.has(CardId.HORSE) == true) {
             perform(MatchAction.ROLL_INLINE, 0, 0)
@@ -563,8 +617,8 @@ fun GameScreen(engine: GameEngine, onRestart: () -> Unit, onOpenSettings: () -> 
         }
     }
 
-    LaunchedEffect(engine, engine.bossMoveTrigger, engine.cardReveal, diceVisible, engine.d4Rolls.size) {
-        if (engine.awaitingBossMove && engine.cardReveal == null && !diceVisible && engine.d4Rolls.isEmpty()) {
+    LaunchedEffect(engine, engine.bossMoveTrigger, engine.cardReveal, diceVisible, engine.d4Rolls.size, driveGame) {
+        if (driveGame && engine.awaitingBossMove && engine.cardReveal == null && !diceVisible && engine.d4Rolls.isEmpty()) {
             delay(1000)
             while (perform(MatchAction.BOSS, 0, 0) == 1) {
                 if (engine.d4Rolls.isNotEmpty()) break
@@ -597,6 +651,13 @@ fun GameScreen(engine: GameEngine, onRestart: () -> Unit, onOpenSettings: () -> 
             }
             Spacer(Modifier.height(8.dp))
             TurnGuide(engine)
+            if (lan != null) {
+                val player = engine.players.getOrNull(lan.seat)?.name.orEmpty()
+                Text(if (lan.paused) lan.status else "Ты играешь за $player", color = AppColors.textMuted)
+                if (!lan.hosting && !lan.connected) {
+                    OutlinedButton(onClick = lan::reconnect, enabled = !lan.busy) { Text("Переподключиться") }
+                }
+            }
             if (engine.duelExit != null && !engine.gameOver) {
                 Text(
                     if (engine.duelKeys.isEmpty()) "Все ключи собраны. Закончи движение на выходе."
@@ -609,21 +670,23 @@ fun GameScreen(engine: GameEngine, onRestart: () -> Unit, onOpenSettings: () -> 
             }
             Spacer(Modifier.height(12.dp))
             PlayersRow(engine, onPlayerClick = { player ->
-                if (botTurn || diceVisible || attackPreview != null) return@PlayersRow
+                if (!localInput || botTurn || diceVisible || attackPreview != null) return@PlayersRow
                 if (engine.pendingChoice is PendingChoice.ChoosePlayer) {
                     perform(MatchAction.PLAYER, engine.players.indexOf(player), 0)
-                } else if (player.activeCards.isNotEmpty()) {
+                } else if (player.activeCards.isNotEmpty() && (lan == null || engine.isCurrentPlayer(player))) {
                     showInventoryFor = player
                 }
             })
 
             Spacer(Modifier.height(8.dp))
             Box(modifier = Modifier.height(boardSize).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                BoardView(engine, attackPreview, inputEnabled = !diceVisible)
+                BoardView(engine, attackPreview, inputEnabled = !diceVisible && localInput)
                 if (diceVisible) key(diceStage) { DiceRollOverlay(diceResult, diceCaption, diceSides) }
-                if (!diceVisible && engine.d4Rolls.isNotEmpty()) {
+                if (!diceVisible && lan?.paused != true && engine.d4Rolls.isNotEmpty()) {
                     key(engine.d4Sequence) {
-                        D4RollOverlay(engine.d4Rolls.first()) { perform(MatchAction.D4, 0, 0) }
+                        D4RollOverlay(engine.d4Rolls.first()) {
+                            if (driveGame) perform(MatchAction.D4, 0, 0)
+                        }
                     }
                 }
             }
@@ -643,7 +706,7 @@ fun GameScreen(engine: GameEngine, onRestart: () -> Unit, onOpenSettings: () -> 
                     fontSize = AppFonts.hint
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(enabled = engine.canPlayActiveCard(player, card), onClick = {
+                    Button(enabled = localInput && engine.canPlayActiveCard(player, card), onClick = {
                         attackPreview = null
                         perform(MatchAction.CARD, engine.players.indexOf(player), card.ordinal)
                     }) { Text("Сыграть карту") }
@@ -651,16 +714,16 @@ fun GameScreen(engine: GameEngine, onRestart: () -> Unit, onOpenSettings: () -> 
                 }
             } else {
                 key(engine.d4Sequence) {
-                    DiceButton(engine, scope, diceVisible || engine.d4Rolls.isNotEmpty() || botTurn || engine.awaitingRollDecision || tutorialFinished || engine.tutorial && engine.bossMoveTrigger == 1 && !engine.attackCardPlayed) {
+                    DiceButton(engine, scope, !localInput || diceVisible || engine.d4Rolls.isNotEmpty() || botTurn || engine.awaitingRollDecision || tutorialFinished || engine.tutorial && engine.bossMoveTrigger == 1 && !engine.attackCardPlayed) {
                         rollWithAnimation()
                     }
                 }
-                if (!diceVisible && engine.canReroll && !botTurn) {
+                if (localInput && !diceVisible && engine.canReroll && !botTurn) {
                     OutlinedButton(onClick = { rollWithAnimation(reroll = true) }, modifier = Modifier.fillMaxWidth()) {
                         Text("Перебросить кубик")
                     }
                 }
-                if (!diceVisible && engine.awaitingRollDecision) {
+                if (localInput && !diceVisible && engine.awaitingRollDecision) {
                     TextButton(
                         onClick = { perform(MatchAction.ACCEPT, 0, 0) },
                         modifier = Modifier.fillMaxWidth()
@@ -668,10 +731,12 @@ fun GameScreen(engine: GameEngine, onRestart: () -> Unit, onOpenSettings: () -> 
                 }
             }
             if (engine.gameOver) {
-                Button(onClick = onRestart, modifier = Modifier.fillMaxWidth()) { Text("Новая игра") }
+                Button(onClick = onRestart, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (lan == null) "Новая игра" else "Покинуть комнату")
+                }
             }
             val current = engine.turnOrder.getOrNull(engine.currentTurnIndex)
-            if (preview == null && !diceVisible && !engine.attackCardPlayed && !engine.awaitingRollDecision && current != null && current.activeCards.isNotEmpty() && engine.pendingSteps == 0 &&
+            if (localInput && preview == null && !diceVisible && !engine.attackCardPlayed && !engine.awaitingRollDecision && current != null && current.activeCards.isNotEmpty() && engine.pendingSteps == 0 &&
                 !engine.awaitingBossMove && !engine.hasPendingAction && !engine.mustSkipCurrentTurn() && !engine.gameOver
             ) {
                 OutlinedButton(onClick = { showInventoryFor = current }, modifier = Modifier.fillMaxWidth()) {
@@ -682,7 +747,7 @@ fun GameScreen(engine: GameEngine, onRestart: () -> Unit, onOpenSettings: () -> 
         }
     }
 
-    showInventoryFor?.let { player ->
+    showInventoryFor?.takeIf { localInput }?.let { player ->
         InventoryDialog(engine, player, onDismiss = { showInventoryFor = null }, onPreview = { card ->
             showInventoryFor = null
             attackPreview = player to card
@@ -709,7 +774,9 @@ fun GameScreen(engine: GameEngine, onRestart: () -> Unit, onOpenSettings: () -> 
             text = { Column {
                 TextButton(onClick = { showGameMenu = false; showRules = true }) { Text("Как играть") }
                 TextButton(onClick = { showGameMenu = false; onOpenSettings() }) { Text("Главное меню") }
-                TextButton(onClick = { showGameMenu = false; confirmRestart = true }) { Text("Начать заново") }
+                if (lan == null) {
+                    TextButton(onClick = { showGameMenu = false; confirmRestart = true }) { Text("Начать заново") }
+                }
             } },
             confirmButton = { TextButton(onClick = { showGameMenu = false }) { Text("Продолжить партию") } }
         )
@@ -723,7 +790,7 @@ fun GameScreen(engine: GameEngine, onRestart: () -> Unit, onOpenSettings: () -> 
             confirmButton = { TextButton(onClick = onRestart) { Text("Начать заново") } }
         )
     }
-    (engine.pendingChoice as? PendingChoice.ChooseEffect)?.takeUnless { botTurn }?.let { choice ->
+    (engine.pendingChoice as? PendingChoice.ChooseEffect)?.takeIf { localInput && !botTurn }?.let { choice ->
         EffectChoiceDialog(choice, onEffectSelected = { effect -> perform(MatchAction.EFFECT, choice.from.effects.indexOf(effect), 0) })
     }
     if (engine.tradePartners.isNotEmpty()) {
@@ -732,7 +799,7 @@ fun GameScreen(engine: GameEngine, onRestart: () -> Unit, onOpenSettings: () -> 
             perform(MatchAction.TRADE, engine.players.indexOf(partner), (offered.ordinal shl 16) or requested.ordinal)
         }
     }
-    engine.cardReveal?.let { event ->
+    engine.cardReveal?.takeIf { localInput }?.let { event ->
         if (event.bot && event.card.choiceReward != null) {
             LaunchedEffect(event) {
                 delay(500)

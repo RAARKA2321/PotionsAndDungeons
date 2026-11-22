@@ -46,8 +46,7 @@ internal class MatchRecording(
         return result
     }
 
-    fun save(preferences: SharedPreferences) {
-        val json = JSONObject()
+    fun snapshot(): JSONObject = JSONObject()
             .put("version", version)
             .put("names", JSONArray(names))
             .put("bots", JSONArray(bots.sorted()))
@@ -60,12 +59,15 @@ internal class MatchRecording(
             .put("style", legacyStyle?.name)
             .put("seed", seed)
             .put("actions", actions)
-        preferences.edit().putString("match", json.toString()).apply()
+    fun save(preferences: SharedPreferences) {
+        preferences.edit().putString("match", snapshot().toString()).apply()
     }
 
     companion object {
-        fun read(preferences: SharedPreferences): MatchRecording? = runCatching {
-            val json = JSONObject(preferences.getString("match", null) ?: return null)
+        fun read(preferences: SharedPreferences): MatchRecording? =
+            preferences.getString("match", null)?.let { runCatching { restore(JSONObject(it)) }.getOrNull() }
+
+        fun restore(json: JSONObject): MatchRecording {
             val version = json.getInt("version")
             require(version in 1..7)
             val names = json.getJSONArray("names")
@@ -92,8 +94,8 @@ internal class MatchRecording(
                 val action = actions.getJSONArray(index)
                 recording.perform(MatchAction.valueOf(action.getString(0)), action.getInt(1), action.getInt(2))
             }
-            recording
-        }.getOrNull()
+            return recording
+        }
     }
 }
 

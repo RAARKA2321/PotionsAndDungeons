@@ -388,7 +388,7 @@ fun SetupScreen(
             Button(onClick = onResume, modifier = Modifier.fillMaxWidth()) { Text("Продолжить партию") }
         }
         Button(onClick = { setupPage = 1 }, modifier = Modifier.fillMaxWidth()) { Text("Новая игра") }
-        OutlinedButton(onClick = onOpenLan, modifier = Modifier.fillMaxWidth()) { Text("Игра по Wi‑Fi") }
+        OutlinedButton(onClick = onOpenLan, modifier = Modifier.fillMaxWidth()) { Text("Сетевая игра") }
         TextButton(onClick = { showCatalog = true }) { Text("Справочник зелий") }
         TextButton(onClick = {
             versionTaps++

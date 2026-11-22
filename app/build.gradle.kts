@@ -3,6 +3,9 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+val relayEndpoint = providers.gradleProperty("relayEndpoint").orElse("").get()
+require(relayEndpoint.matches(Regex("[a-zA-Z0-9.:-]*"))) { "Use a domain or domain:port for relayEndpoint" }
+
 android {
     namespace = "com.example.potionsanddungeons"
     compileSdk {
@@ -13,13 +16,19 @@ android {
         applicationId = "com.example.potionsanddungeons"
         minSdk = 24
         targetSdk = 37
-        versionCode = 7
-        versionName = "1.4.0"
+        versionCode = 8
+        versionName = "1.5.0"
+        buildConfigField("String", "RELAY_ENDPOINT", "\"$relayEndpoint\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
+        debug {
+            if (providers.gradleProperty("vpnTest").isPresent) {
+                applicationIdSuffix = ".vpntest"
+            }
+        }
         release {
             optimization {
                 enable = true
@@ -33,6 +42,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

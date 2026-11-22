@@ -68,6 +68,9 @@ internal class LanRoom {
     private data class Seat(val name: String, val token: String, var connection: Connection?)
     private val seats = mutableListOf<Seat>()
     private var server: ServerSocket? = null
+    private var relayControl: Socket? = null
+    private var relay: InternetRelay? = null
+    private var joiningViaVpn = false
     private var hostConnection: Connection? = null
     private var match: MatchRecording? = null
     private var revision = 0
@@ -106,19 +109,25 @@ internal class LanRoom {
         get() = connected && !paused && !waitingForReply &&
             engine?.let { game -> game.turnOrder.getOrNull(game.currentTurnIndex) === game.players.getOrNull(seat) } == true
 
-    fun host(name: String) {
+    fun host(name: String, vpnAddress: String? = null) {
         if (busy || connected) return
         hosting = true
         busy = true
         status = "Создаю комнату…"
         scope.launch {
             try {
+                val vpnIp = vpnAddress?.let {
+                    parseIpv4(it.trim()) ?: throw IOException("Invalid VPN IPv4 address")
+                }
                 val listener = withContext(Dispatchers.IO) {
-                    val ip = findLocalAddress() ?: throw IOException("Нет адреса в локальной сети")
+                    // Userspace VPNs can forward incoming traffic to loopback.
+                    val bindAddress = if (vpnIp == null) {
+                        findLocalAddress() ?: throw IOException("Нет адреса в локальной сети")
+                    } else null
                     ServerSocket().apply {
                         try {
                             reuseAddress = true
-                            bind(InetSocketAddress(ip, PORT))
+                            bind(InetSocketAddress(bindAddress, PORT))
                         } catch (e: IOException) {
                             close()
                             throw e
@@ -126,17 +135,13 @@ internal class LanRoom {
                     }
                 }
                 server = listener
-                hostAddress = listener.inetAddress.hostAddress.orEmpty()
-                roomCode = String.format(Locale.ROOT, "%06d", SecureRandom().nextInt(1_000_000))
-                seat = 0
-                seats.add(Seat(cleanName(name, 0), token, null))
-                names = seats.map { it.name }
-                connected = true
-                busy = false
-                status = "Ожидаем игроков"
+                hostAddress = (vpnIp ?: listener.inetAddress).hostAddress.orEmpty()
+                openRoom(name, String.format(Locale.ROOT, "%06d", SecureRandom().nextInt(1_000_000)))
                 while (isActive) {
                     val socket = withContext(Dispatchers.IO) { listener.accept() }
-                    if (connections.size >= 8) socket.close()
+                    val acceptedAddress = vpnIp == null || socket.localAddress == vpnIp ||
+                        socket.localAddress.isLoopbackAddress
+                    if (!acceptedAddress || connections.size >= 8) socket.close()
                     else attach(Connection(socket))
                 }
             } catch (_: IOException) {
@@ -145,15 +150,98 @@ internal class LanRoom {
                     connected = false
                     busy = false
                     paused = engine != null
-                    status = "Не удалось открыть комнату. Проверь подключение к Wi‑Fi."
+                    status = if (vpnAddress == null) "Не удалось открыть комнату. Проверь подключение к Wi‑Fi."
+                    else "Не удалось открыть комнату. Включи VPN и проверь свой IPv4-адрес."
                 }
             }
         }
     }
 
-    fun join(host: String, code: String, name: String) {
+    fun hostOnline(endpoint: String, name: String) {
+        if (busy || connected) return
+        hosting = true
+        busy = true
+        status = "Создаю онлайн-комнату…"
+        val service = InternetRelay(endpoint.trim())
+        scope.launch {
+            var control: Socket? = null
+            try {
+                val reply = withContext(Dispatchers.IO) {
+                    val socket = service.connect(JSONObject().put("role", "host"))
+                    control = socket
+                    service.read(socket).also { socket.soTimeout = 25_000 }
+                }
+                if (reply.optString("type") != "room") throw IOException("Relay rejected room")
+                val socket = checkNotNull(control)
+                relayControl = socket
+                openRoom(name, reply.optString("code"))
+                val key = reply.optString("key")
+                while (isActive) {
+                    val event = withContext(Dispatchers.IO) { service.read(socket) }
+                    if (event.optString("type") == "peer" && connections.size < 8) {
+                        attachOnlineGuest(service, key, event.optString("ticket"))
+                    }
+                }
+            } catch (_: IOException) {
+                if (!closed) {
+                    if (engine == null) {
+                        hosting = false
+                        seats.clear()
+                        names = emptyList()
+                    }
+                    connected = false
+                    busy = false
+                    paused = engine != null
+                    status = "Связь с сервером потеряна. Проверь адрес сервера и подключение к интернету."
+                }
+            } finally {
+                runCatching { control?.close() }
+                relayControl = null
+                connections.toList().forEach(Connection::close)
+            }
+        }
+    }
+
+    private suspend fun attachOnlineGuest(service: InternetRelay, key: String, ticket: String) {
+        var peer: Socket? = null
+        try {
+            val socket = withContext(Dispatchers.IO) {
+                service.connect(JSONObject().put("role", "peer").put("code", roomCode)
+                    .put("key", key).put("ticket", ticket)).also { peer = it }
+            }
+            attach(Connection(socket))
+            peer = null
+        } catch (_: IOException) {
+            // The guest can retry without closing the room.
+        } finally {
+            runCatching { peer?.close() }
+        }
+    }
+
+    private fun openRoom(name: String, code: String) {
+        roomCode = code
+        seat = 0
+        seats.add(Seat(cleanName(name, 0), token, null))
+        names = seats.map { it.name }
+        connected = true
+        busy = false
+        status = "Ожидаем игроков"
+    }
+
+    fun join(host: String, code: String, name: String, viaVpn: Boolean = false) {
         if (busy || connected || hosting) return
+        relay = null
+        joiningViaVpn = viaVpn
         address = host.trim()
+        joinCode = code.trim()
+        joinName = name
+        connect()
+    }
+
+    fun joinOnline(endpoint: String, code: String, name: String) {
+        if (busy || connected || hosting) return
+        address = endpoint.trim()
+        relay = InternetRelay(address)
         joinCode = code.trim()
         joinName = name
         connect()
@@ -167,23 +255,41 @@ internal class LanRoom {
         busy = true
         status = "Подключаюсь…"
         scope.launch {
-            val socket = Socket()
+            var opened: Socket? = null
+            val service = relay
             try {
-                withContext(Dispatchers.IO) {
-                    val ip = parseLocalAddress(address) ?: throw IOException("Нужен локальный IPv4-адрес")
-                    socket.connect(InetSocketAddress(ip, PORT), 4500)
+                val socket = withContext(Dispatchers.IO) {
+                    if (service == null) {
+                        val ip = parseIpv4(address)?.takeIf { joiningViaVpn || it.isSiteLocalAddress }
+                            ?: throw IOException("Invalid room IPv4 address")
+                        Socket().also {
+                            opened = it
+                            it.connect(InetSocketAddress(ip, PORT), 4500)
+                        }
+                    } else {
+                        val guest = service.connect(JSONObject().put("role", "guest").put("code", joinCode))
+                        opened = guest
+                        if (service.read(guest).optString("type") != "ready") {
+                            throw IOException("Relay rejected room code")
+                        }
+                        guest
+                    }
                 }
                 val connection = Connection(socket)
                 hostConnection = connection
                 attach(connection)
+                opened = null
                 connection.send(JSONObject().put("type", "join").put("protocol", PROTOCOL)
                     .put("code", joinCode).put("token", token).put("name", joinName))
             } catch (_: IOException) {
-                runCatching { socket.close() }
                 busy = false
-                status = "Не удалось подключиться. Проверь адрес и общую Wi‑Fi сеть."
+                status = when {
+                    service != null -> "Не удалось подключиться. Проверь код комнаты, адрес сервера и интернет."
+                    joiningViaVpn -> "Не удалось подключиться. Проверь адрес ведущего и общую VPN-сеть."
+                    else -> "Не удалось подключиться. Проверь адрес и общую Wi‑Fi сеть."
+                }
             } finally {
-                if (closed) runCatching { socket.close() }
+                runCatching { opened?.close() }
             }
         }
     }
@@ -324,7 +430,7 @@ internal class LanRoom {
             val index = seats.indexOfFirst { it.connection === connection }
             if (index < 0) return
             seats[index].connection = null
-            broadcastRoom()
+            if (connected) broadcastRoom()
         } else if (hostConnection === connection) {
             hostConnection = null
             busy = false
@@ -434,6 +540,7 @@ internal class LanRoom {
     fun close() {
         closed = true
         runCatching { server?.close() }
+        runCatching { relayControl?.close() }
         connections.toList().forEach(Connection::close)
         scope.cancel()
     }
@@ -446,10 +553,10 @@ internal class LanRoom {
             .firstOrNull { it.address.size == 4 && it.isSiteLocalAddress }
     }
 
-    private fun parseLocalAddress(host: String): InetAddress? {
+    private fun parseIpv4(host: String): InetAddress? {
         val parts = host.split('.').map { it.toIntOrNull() }
         if (parts.size != 4 || parts.any { it == null || it !in 0..255 }) return null
         return InetAddress.getByAddress(parts.map { checkNotNull(it).toByte() }.toByteArray())
-            .takeIf { it.isSiteLocalAddress }
+            .takeUnless { it.isAnyLocalAddress || it.isMulticastAddress || it.isLoopbackAddress }
     }
 }

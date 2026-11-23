@@ -632,11 +632,6 @@ internal fun GameScreen(
             }
             Spacer(Modifier.height(8.dp))
             TurnGuide(engine)
-            if (lan?.hosting == true && engine.gameOver) {
-                Button(onClick = lan::rematch, enabled = lan.canRematch, modifier = Modifier.fillMaxWidth()) {
-                    Text("Новая партия")
-                }
-            }
             if (lan != null) {
                 val player = engine.players.getOrNull(lan.seat)?.name.orEmpty()
                 Text(if (lan.paused) lan.status else "Ты играешь за $player", color = AppColors.textMuted)
@@ -719,6 +714,11 @@ internal fun GameScreen(
             if (engine.gameOver) {
                 Button(onClick = onRestart, modifier = Modifier.fillMaxWidth()) {
                     Text(if (lan == null) "Новая игра" else "Покинуть комнату")
+                }
+                if (lan?.hosting == true) {
+                    Button(onClick = lan::rematch, enabled = lan.canRematch, modifier = Modifier.fillMaxWidth()) {
+                        Text("Играть снова")
+                    }
                 }
             }
             val current = engine.turnOrder.getOrNull(engine.currentTurnIndex)

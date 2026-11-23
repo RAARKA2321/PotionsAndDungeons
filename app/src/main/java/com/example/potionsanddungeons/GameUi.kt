@@ -632,6 +632,11 @@ internal fun GameScreen(
             }
             Spacer(Modifier.height(8.dp))
             TurnGuide(engine)
+            if (lan?.hosting == true && engine.gameOver) {
+                Button(onClick = lan::rematch, enabled = lan.canRematch, modifier = Modifier.fillMaxWidth()) {
+                    Text("Новая партия")
+                }
+            }
             if (lan != null) {
                 val player = engine.players.getOrNull(lan.seat)?.name.orEmpty()
                 Text(if (lan.paused) lan.status else "Ты играешь за $player", color = AppColors.textMuted)

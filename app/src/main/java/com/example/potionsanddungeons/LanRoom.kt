@@ -451,7 +451,24 @@ internal class LanRoom {
     }
 
     fun start() {
-        if (!hosting || match != null || paused || seats.size !in 2..4) return
+        if (!hosting || !connected || match != null || paused || seats.size !in 2..4) return
+        startMatch()
+    }
+
+    val canRematch: Boolean
+        get() = hosting && connected && !paused && engine?.gameOver == true
+
+    fun rematch() {
+        if (!canRematch) return
+        // Reject commands queued by a guest before the new match's snapshot arrives.
+        revision++
+        startMatch()
+    }
+
+    private fun startMatch() {
+        driving?.cancel()
+        driving = null
+        lastRoll = null
         val recording = MatchRecording(names, emptySet(), false)
         match = recording
         engine = recording.engine

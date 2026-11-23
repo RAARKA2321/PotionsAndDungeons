@@ -15,7 +15,7 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class LanRoomTest {
     @Test
-    fun hostAndGuestSynchronizeATurnAndPauseWhenGuestLeaves() = runBlocking {
+    fun hostAndGuestSynchronizeTurnsAndRematchInTheSameRoom() = runBlocking {
         withContext(Dispatchers.Main) {
             val host = LanRoom()
             val guest = LanRoom()
@@ -50,6 +50,31 @@ class LanRoomTest {
                     hostGame.players.first { it.name == current }.position == cell &&
                         guestGame.players.first { it.name == current }.position == cell
                 }
+                val code = host.roomCode
+                val guestSeat = guest.seat
+                host.rematch()
+                assertTrue(host.engine === hostGame)
+                hostGame.gameOver = true
+                guest.rematch()
+                assertTrue(guest.engine === guestGame)
+                assertTrue(host.canRematch)
+                host.rematch()
+                awaitState {
+                    host.engine !== hostGame && guest.engine !== guestGame &&
+                        host.engine?.turnOrder?.size == 2 && guest.engine?.turnOrder?.size == 2
+                }
+                val nextHostGame = checkNotNull(host.engine)
+                val nextGuestGame = checkNotNull(guest.engine)
+                assertEquals(code, host.roomCode)
+                assertEquals(guestSeat, guest.seat)
+                assertEquals(host.names, guest.names)
+                assertFalse(nextHostGame.gameOver)
+                assertFalse(nextGuestGame.gameOver)
+                assertEquals(nextHostGame.turnOrder.map { it.name }, nextGuestGame.turnOrder.map { it.name })
+                val nextActive = if (host.canAct) host else guest
+                nextActive.perform(MatchAction.ROLL_INLINE, 0, 0)
+                awaitState { nextHostGame.pendingSteps > 0 && nextGuestGame.pendingSteps > 0 }
+                assertEquals(nextHostGame.lastDiceRoll, nextGuestGame.lastDiceRoll)
                 guest.close()
                 awaitState { host.paused }
                 assertFalse(host.canAct)

@@ -6,6 +6,88 @@ import org.junit.Test
 
 class GameEngineTest {
     @Test
+    fun largeBoardSupportsMovementAndEffectsBeyondTheOriginalEdge() {
+        val engine = GameEngine(true, Random(1), customRules = CustomRules(
+            breakableDoors = true, board = BoardOptions(size = 7)
+        ))
+        engine.setupGame(listOf("А", "Б"))
+        assertEquals(listOf(Cell(0, 0), Cell(6, 6)), engine.players.map { it.position })
+        assertEquals(Cell(3, 3), engine.bosses.single().position)
+        assertEquals(setOf(Cell(3, 2), Cell(3, 4)), engine.doors)
+        assertEquals(8, engine.potions.size)
+        val player = engine.turnOrder.first()
+        player.position = Cell(5, 5)
+        engine.pendingSteps = 2
+        assertEquals(Cell(5, 6), engine.directionalMoveTarget(Direction.RIGHT))
+        engine.handleCellClick(Cell(5, 6))
+        assertEquals(Cell(5, 6), player.position)
+        assertNull(engine.directionalMoveTarget(Direction.RIGHT))
+        engine.bosses.single().position = Cell(6, 6)
+        assertTrue(engine.occupiedAttackTargets(player).contains(Cell(6, 6)))
+    }
+
+    @Test
+    fun collectedPotionMovesToAFreeCellWhenRandomReplacementIsEnabled() {
+        val engine = GameEngine(false, Random(2), customRules = CustomRules(
+            board = BoardOptions(size = 7, potionPlacement = PotionPlacement.RANDOM_REPLACEMENT)
+        ))
+        engine.setupGame(listOf("А", "Б"))
+        val player = engine.turnOrder.first()
+        val potion = engine.potions.first()
+        val oldPosition = potion.position
+        val occupied = engine.potions.map { it.position } + engine.players.map { it.position } +
+            engine.bosses.map { it.position }
+        player.position = oldPosition
+        val card = potion.card
+        engine.checkPotionAt(player)
+        assertNotEquals(oldPosition, potion.position)
+        assertFalse(potion.position in occupied)
+        assertTrue(potion.position.inBounds(7))
+        assertEquals(8, engine.potions.size)
+        assertEquals(card.effect, engine.cardReveal?.card)
+    }
+
+    @Test
+    fun fullLargeBoardRefillsEveryTileAndAppliesTheCustomCardEffect() {
+        val custom = CustomCard("Флакон ветра", CardId.SPEED, "Порыв ветра")
+        val engine = GameEngine(false, Random(3), customRules = CustomRules(
+            bossDuel = true, board = BoardOptions(7, PotionPlacement.EVERY_CELL, listOf(custom))
+        ))
+        engine.setupGame(listOf("А"))
+        val player = engine.players.single()
+        val potion = engine.potions.single { it.card.custom == custom }
+        player.position = potion.position
+        val allCells = List(49) { Cell(it / 7, it % 7) }.toSet()
+        assertEquals(allCells, engine.potions.map { it.position }.toSet())
+        engine.checkPotionAt(player)
+        assertEquals(custom, engine.cardReveal?.customCard)
+        engine.continueAfterPotion()
+        assertTrue(player.effects.has(CardId.SPEED))
+        assertEquals(allCells, engine.potions.map { it.position }.toSet())
+    }
+
+    @Test
+    fun directionalMoveRequiresAnAvailableStepAndNeverChoosesACardTarget() {
+        val engine = GameEngine(false, Random(1))
+        engine.setupCardSandbox()
+        val player = engine.turnOrder.first()
+        player.position = Cell(0, 1)
+        assertNull(engine.directionalMoveTarget(Direction.RIGHT))
+
+        engine.pendingSteps = 2
+        assertNull(engine.directionalMoveTarget(Direction.UP))
+        val destination = checkNotNull(engine.directionalMoveTarget(Direction.RIGHT))
+        assertEquals(Cell(0, 2), destination)
+        engine.handleCellClick(destination)
+        assertEquals(1, engine.pendingSteps)
+        assertNull(engine.directionalMoveTarget(Direction.LEFT))
+
+        engine.requestChooseCell("Телепорт", allowed = { true }, onChosen = {})
+        assertTrue(engine.isBoardTarget(Cell(0, 3)))
+        assertNull(engine.directionalMoveTarget(Direction.RIGHT))
+    }
+
+    @Test
     fun duelEndsOnlyAfterCollectingAllKeysAndReturningToTheExit() {
         val engine = GameEngine(false, Random(1), customRules = CustomRules(bossDuel = true))
         engine.setupGame(listOf("А"))
@@ -375,19 +457,40 @@ class GameEngineTest {
     }
 
     @Test
-    fun immunityBlocksNegativePotionsButKeepsPositiveEffects() {
+    fun immunityIsConsumedOnlyByTheFirstNegativePotion() {
         val engine = game()
         val player = engine.turnOrder.first()
         engine.pickupAndContinue(player, Potion(player.position, DeckSource.BASE, CardId.IMMUNITY))
 
-        for (card in CardId.entries.filter { it.isNegative() }) {
-            val source = if (card.isDlc) DeckSource.DLC else DeckSource.BASE
-            engine.pickupAndContinue(player, Potion(player.position, source, card))
-        }
         engine.pickupAndContinue(player, Potion(player.position, DeckSource.BASE, CardId.SPEED))
-
         assertEquals(listOf(CardId.IMMUNITY, CardId.SPEED), player.effects.map { it.id })
+        engine.pickupAndContinue(player, Potion(player.position, DeckSource.BASE, CardId.STUN))
         assertFalse(player.skipNextTurn)
+        assertFalse(player.effects.has(CardId.IMMUNITY))
+        engine.pickupAndContinue(player, Potion(player.position, DeckSource.BASE, CardId.STUN))
+        assertTrue(player.skipNextTurn)
+    }
+
+    @Test
+    fun movementEffectsStackAndOffsetEachOtherBeforeSkipping() {
+        val engine = GameEngine(false, ScriptedRolls(4, 1, 1))
+        engine.setupGame(listOf("А", "Б"))
+        val player = engine.turnOrder.first()
+        repeat(3) { engine.pickupAndContinue(player, Potion(player.position, DeckSource.BASE, CardId.SPEED)) }
+        repeat(2) { engine.pickupAndContinue(player, Potion(player.position, DeckSource.BASE, CardId.SLOWDOWN)) }
+        assertEquals(2, engine.rollDiceForCurrentPlayer())
+    }
+
+    @Test
+    fun stackedSlowdownStillAllowsARerollBeforeTheTurnIsSkipped() {
+        val engine = GameEngine(false, ScriptedRolls(4, 1, 2, 4), offerReroll = true)
+        engine.setupGame(listOf("А", "Б"))
+        val player = engine.turnOrder.first()
+        repeat(2) { engine.pickupAndContinue(player, Potion(player.position, DeckSource.BASE, CardId.SLOWDOWN)) }
+        engine.rollDiceForCurrentPlayer()
+        assertEquals(0, engine.pendingSteps)
+        assertTrue(engine.canReroll)
+        assertEquals(2, engine.decideRoll(true))
     }
 
     @Test

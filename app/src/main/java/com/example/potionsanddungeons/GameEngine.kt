@@ -12,9 +12,16 @@ sealed class PendingChoice {
     data class ChooseEffect(val from: Player, val onChosen: (ActiveEffect) -> Unit) : PendingChoice()
 }
 
-data class CardRevealEvent(val playerName: String, val card: CardId, val canCleanse: Boolean = false, val bot: Boolean = false)
+data class CardRevealEvent(
+    val playerName: String, val card: CardId, val canCleanse: Boolean = false,
+    val bot: Boolean = false, val customCard: CustomCard? = null
+)
 
-class GameEngine(private val dlcEnabled: Boolean, private val random: Random = Random, private val animateD4: Boolean = false, private val offerReroll: Boolean = false, private val legacyAttackTurns: Boolean = false, private val legacyBossCrossing: Boolean = false, private val customRules: CustomRules = CustomRules(), private val movementRandom: Random = random) {
+class GameEngine(private val dlcEnabled: Boolean, private val random: Random = Random, private val animateD4: Boolean = false, private val offerReroll: Boolean = false, private val legacyAttackTurns: Boolean = false, private val legacyBossCrossing: Boolean = false, private val customRules: CustomRules = CustomRules(), private val movementRandom: Random = random, private val legacyPotionRules: Boolean = false) {
+    val boardSize = customRules.board.size
+    private val boardCenter = boardCenter(boardSize)
+    private val boardCorners = boardCorners(boardSize)
+    private val boardCells = List(boardSize * boardSize) { Cell(it / boardSize, it % boardSize) }
     var awaitingRollDecision by mutableStateOf(false)
         private set
     private var inlineRerollAvailable by mutableStateOf(false)
@@ -46,7 +53,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
     private var revealedPotionAction: ((Boolean) -> Unit)? = null
     var doors by mutableStateOf(emptySet<Cell>())
         private set
-    val duelExit: Cell? = CORNERS.first().takeIf { customRules.bossDuel }
+    val duelExit: Cell? = boardCorners.first().takeIf { customRules.bossDuel }
     var duelKeys by mutableStateOf(emptySet<Cell>())
         private set
     var tradePartners by mutableStateOf(emptyList<Player>())
@@ -116,24 +123,31 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
         afterD4 = null
         d4Rolls.clear()
         turnOrder = emptyList()
-        require(if (customRules.bossDuel) names.size == 1 && botSlots.isEmpty() else names.size in 2..CORNERS.size)
-        deck = PotionDeck(dlcEnabled, random, customRules.choicePotions, duel = customRules.bossDuel)
-        duelKeys = if (customRules.bossDuel) CORNERS.drop(1).toSet() else emptySet()
+        require(if (customRules.bossDuel) names.size == 1 && botSlots.isEmpty() else names.size in 2..boardCorners.size)
+        deck = PotionDeck(dlcEnabled, random, customRules.choicePotions, customRules.bossDuel, customRules.board.customCards)
+        duelKeys = if (customRules.bossDuel) boardCorners.drop(1).toSet() else emptySet()
         tradePartners = emptyList()
         considerTrade = false
-        doors = if (customRules.breakableDoors) setOf(Cell(2, 1), Cell(2, 3)) else emptySet()
-        cornerDecks = assignCornerDecks(dlcEnabled, random)
+        doors = if (customRules.breakableDoors) setOf(
+            boardCenter.copy(col = boardCenter.col - 1), boardCenter.copy(col = boardCenter.col + 1)
+        ) else emptySet()
+        cornerDecks = assignCornerDecks(dlcEnabled, random, boardSize)
 
-        players = names.mapIndexed { i, name -> Player(name, CORNERS[i], i in botSlots) }
-        bosses = listOf(BossUnit(1, Cell(CENTER.row, CENTER.col)))
+        players = names.mapIndexed { i, name -> Player(name, boardCorners[i], i in botSlots) }
+        bosses = listOf(BossUnit(1, boardCenter))
 
-        val newPotions = mutableListOf<Potion>()
-        cornerDecks.forEach { assignment ->
-            diagonalCellsFromCorner(assignment.corner).forEach { cell ->
-                newPotions.add(Potion(cell, assignment.source, deck.draw(assignment.source)))
+        potions = if (customRules.board.potionPlacement == PotionPlacement.EVERY_CELL) {
+            boardCells.map { cell ->
+                val source = potionSourceAt(cell)
+                Potion(cell, source, deck.draw(source))
+            }
+        } else {
+            cornerDecks.flatMap { assignment ->
+                diagonalCellsFromCorner(assignment.corner, boardSize).map { cell ->
+                    Potion(cell, assignment.source, deck.draw(assignment.source))
+                }
             }
         }
-        potions = newPotions
         bananaPeels.clear()
 
         bossSpeedBonus = 0
@@ -246,13 +260,13 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
     private fun isKnightDestination(player: Player, cell: Cell): Boolean {
         val dr = kotlin.math.abs(cell.row - player.position.row)
         val dc = kotlin.math.abs(cell.col - player.position.col)
-        return cell.inBounds() && cell !in doors && dr * dc == 2 && bosses.none { it.position == cell }
+        return cell.inBounds(boardSize) && cell !in doors && dr * dc == 2 && bosses.none { it.position == cell }
     }
 
     fun canMoveAsKnight(): Boolean {
         val player = turnOrder.getOrNull(currentTurnIndex) ?: return false
-        return player.effects.has(CardId.HORSE) && (0 until BOARD_SIZE).any { row ->
-            (0 until BOARD_SIZE).any { col -> isKnightDestination(player, Cell(row, col)) }
+        return player.effects.has(CardId.HORSE) && (0 until boardSize).any { row ->
+            (0 until boardSize).any { col -> isKnightDestination(player, Cell(row, col)) }
         }
     }
 
@@ -262,17 +276,32 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
 
     internal fun isCurrentPlayer(player: Player): Boolean = player == turnOrder.getOrNull(currentTurnIndex)
 
+    internal fun directionalMoveTarget(direction: Direction): Cell? {
+        if (cardReveal != null || pendingChoice != null || tradePartners.isNotEmpty()) return null
+        val position = when {
+            pendingCuckoldSteps > 0 -> bosses.firstOrNull()?.position
+            pendingPuppetSteps > 0 -> puppetTarget?.position
+            pendingSteps > 0 -> turnOrder.getOrNull(currentTurnIndex)?.position
+            else -> null
+        } ?: return null
+        return Cell(position.row + direction.dr, position.col + direction.dc).takeIf(::isSelectableBoardCell)
+    }
+
+    internal fun isSelectableBoardCell(cell: Cell): Boolean =
+        isBoardTarget(cell) && turnOrder.getOrNull(currentTurnIndex)?.isBot != true &&
+            (!tutorial || if (pendingChoice != null) bosses.any { it.position == cell } else attackCardPlayed || cell == Cell(0, 1))
+
     fun isBoardTarget(cell: Cell): Boolean {
         if (awaitingRollDecision) return false
-        if (gameOver || awaitingBossMove || d4Rolls.isNotEmpty() || !cell.inBounds()) return false
+        if (gameOver || awaitingBossMove || d4Rolls.isNotEmpty() || !cell.inBounds(boardSize)) return false
         when (val choice = pendingChoice) {
             is PendingChoice.ChooseCell -> return choice.allowed(cell)
             is PendingChoice.ChoosePlayer -> return players.any { it.position == cell && choice.allowed(it) }
             is PendingChoice.ChooseEffect -> return false
             null -> Unit
         }
-        if (pendingCuckoldSteps > 0) return bosses.firstOrNull()?.position?.neighbors4()?.contains(cell) == true
-        if (pendingPuppetSteps > 0) return cell !in doors && puppetTarget?.position?.neighbors4()?.contains(cell) == true
+        if (pendingCuckoldSteps > 0) return bosses.firstOrNull()?.position?.neighbors4(boardSize)?.contains(cell) == true
+        if (pendingPuppetSteps > 0) return cell !in doors && puppetTarget?.position?.neighbors4(boardSize)?.contains(cell) == true
         val current = turnOrder.getOrNull(currentTurnIndex) ?: return false
         if (pendingSteps > 0) {
             return Direction.entries.any { direction ->
@@ -287,7 +316,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
         direction != lastDirection?.opposite() && isWalkableCell(cell)
 
     private fun isWalkableCell(cell: Cell): Boolean =
-        cell.inBounds() && cell !in doors && (!dlcEnabled || legacyBossCrossing || bosses.none { it.position == cell })
+        cell.inBounds(boardSize) && cell !in doors && (!dlcEnabled || legacyBossCrossing || bosses.none { it.position == cell })
 
     fun rollDiceForCurrentPlayer(waitForAcceptance: Boolean = false): Int {
         if (gameOver || pendingSteps > 0 || turnOrder.isEmpty() || awaitingBossMove || hasPendingAction || awaitingRollDecision) return 0
@@ -325,8 +354,8 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
         val eligible = offerReroll && !current.isBot && !current.rerollUsed &&
             (waitForAcceptance || !attackCardPlayed)
         if (eligible) {
-            if (waitForAcceptance || lastDiceRoll == 1 && current.effects.has(CardId.SLOWDOWN) ||
-                current.position.neighbors4().none(::isWalkableCell)
+            if (waitForAcceptance || adjustedMovementRoll(current) <= 0 ||
+                current.position.neighbors4(boardSize).none(::isWalkableCell)
             ) {
                 awaitingRollDecision = true
                 return lastDiceRoll
@@ -349,22 +378,26 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
         return applyDiceRoll(current)
     }
 
+    internal fun movementEffectCount(player: Player, card: CardId): Int {
+        val count = player.effects.count { it.id == card }
+        return if (legacyPotionRules) count.coerceAtMost(1) else count
+    }
+
+    private fun adjustedMovementRoll(current: Player): Int {
+        val slow = movementEffectCount(current, CardId.SLOWDOWN)
+        if (legacyPotionRules && lastDiceRoll == 1 && slow > 0) return 0
+        return lastDiceRoll + movementEffectCount(current, CardId.SPEED) - slow
+    }
+
     private fun applyDiceRoll(current: Player): Int {
-        var roll = lastDiceRoll
-
-        if (current.effects.has(CardId.SLOWDOWN)) {
-            if (roll == 1) {
-                addLog("${current.name}: «Замедление» — на единице ход сгорает")
-                nextTurn()
-                return 0
-            }
-            roll = maxOf(1, roll - 1)
-            addLog("${current.name}: «Замедление» снижает шаги до $roll")
+        val roll = adjustedMovementRoll(current)
+        if (roll <= 0) {
+            addLog("${current.name}: «Замедление» — шагов не осталось, ход сгорает")
+            nextTurn()
+            return 0
         }
-
-        if (current.effects.has(CardId.SPEED)) {
-            roll += 1
-            addLog("${current.name}: «Скорость» увеличивает шаги до $roll")
+        if (roll != lastDiceRoll) {
+            addLog("${current.name}: после эффектов движения — $roll шагов")
         }
 
         pendingSteps = roll
@@ -380,7 +413,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
     fun handleCellClick(target: Cell) {
         if (awaitingRollDecision) return
         if (cardReveal != null || d4Rolls.isNotEmpty()) return
-        if (gameOver || awaitingBossMove || !target.inBounds()) return
+        if (gameOver || awaitingBossMove || !target.inBounds(boardSize)) return
         if (pendingChoice != null) {
             resolvePendingChoiceClick(target)
             return
@@ -500,7 +533,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
         withD4 { roll ->
         val wall = Wall.byNumber(roll)
         val next = Cell(player.position.row + wall.vector.row, player.position.col + wall.vector.col)
-        if (next.inBounds() && next !in doors) {
+        if (next.inBounds(boardSize) && next !in doors) {
             player.position = next
             addLog("${player.name}: эффект «Даун» — дополнительный шаг к стене №${wall.number}")
             val slipped = checkBananaPeel(player)
@@ -530,20 +563,26 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
 
     fun resolvePotionCard(player: Player, potion: Potion) {
         if (!player.alive || gameOver) return
-        val card = potion.cardId
-        deck.discard(card)
-        potion.cardId = deck.draw(potion.source)
+        val picked = potion.card
+        deck.discard(picked, potion.source)
+        potion.card = deck.draw(potion.source)
         potion.usedTrigger++
         potion.revealed = false
-        revealPickedCard(player, card)
+        if (customRules.board.potionPlacement == PotionPlacement.RANDOM_REPLACEMENT) {
+            val occupied = potions.map { it.position }.toSet() + doors + duelKeys +
+                players.filter { it.alive }.map { it.position } + bosses.map { it.position }
+            boardCells.filterNot { it in occupied || it == duelExit }.randomOrNull(random)?.let { potion.position = it }
+        }
+        revealPickedCard(player, picked.effect, picked.custom)
     }
 
-    private fun revealPickedCard(player: Player, card: CardId, afterPickup: () -> Unit = {}) {
+    private fun revealPickedCard(player: Player, card: CardId, customCard: CustomCard? = null, afterPickup: () -> Unit = {}) {
         val reward = card.choiceReward
         val negative = if (reward != null) player.effects.firstOrNull { it.id.isNegative() } else null
         val canCleanse = reward != null && (negative != null || player.stunnedTurns > 0 || player.skipNextTurn)
-        cardReveal = CardRevealEvent(player.name, card, canCleanse, player.isBot)
-        addLog("${player.name}: подобрал «${card.displayName()}»")
+        cardReveal = CardRevealEvent(player.name, card, canCleanse, player.isBot, customCard)
+        val name = customCard?.name ?: card.displayName()
+        addLog("${player.name}: подобрал «$name»")
         revealedPotionAction = { cleanse ->
             if (reward != null && cleanse && canCleanse) {
                 val removed = when {
@@ -564,14 +603,21 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
             } else if (card.isActive) {
                 player.activeCards.add(card)
                 addLog("${player.name}: карта ушла в инвентарь")
-            } else if (card.isNegative() && player.effects.has(CardId.IMMUNITY)) {
-                addLog("${player.name}: иммунитет заблокировал «${card.displayName()}»")
+            } else if (blockNegativePotion(player, card)) {
+                addLog("${player.name}: иммунитет заблокировал «$name»")
             } else {
                 EffectRegistry.get(reward ?: card)?.onPickup(this, player)
                 checkPendingEffects(player)
             }
             afterPickup()
         }
+    }
+
+    private fun blockNegativePotion(player: Player, card: CardId): Boolean {
+        if (!card.isNegative()) return false
+        val immunity = player.effects.get(CardId.IMMUNITY) ?: return false
+        if (!legacyPotionRules) player.effects.remove(immunity)
+        return true
     }
 
     fun continueAfterPotion(cleanse: Boolean = false) {
@@ -771,9 +817,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
 
     fun spawnSecondBoss() {
         if (bosses.size >= 2) return
-        val openCells = CORNERS + (0 until BOARD_SIZE).flatMap { row ->
-            (0 until BOARD_SIZE).map { col -> Cell(row, col) }
-        }
+        val openCells = boardCorners + boardCells
         val spawn = openCells.first { cell ->
             players.none { it.alive && it.position == cell } && bosses.none { it.position == cell }
         }
@@ -809,7 +853,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
         val dr = (boss.position.row - holder.position.row).let { if (it > 0) 1 else if (it < 0) -1 else 0 }
         val dc = (boss.position.col - holder.position.col).let { if (it > 0) 1 else if (it < 0) -1 else 0 }
         val newCell = Cell(boss.position.row + dr, boss.position.col + dc)
-        if (newCell.inBounds() && newCell !in doors && newCell != boss.position && bosses.none { it.position == newCell }) {
+        if (newCell.inBounds(boardSize) && newCell !in doors && newCell != boss.position && bosses.none { it.position == newCell }) {
             moveBossTo(boss, newCell)
             addLog("${holder.name} отпугнул босса на (${newCell.row},${newCell.col})")
         }
@@ -820,7 +864,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
         val dr = (boss.position.row - holder.position.row).let { if (it > 0) 1 else if (it < 0) -1 else 0 }
         val dc = (boss.position.col - holder.position.col).let { if (it > 0) 1 else if (it < 0) -1 else 0 }
         val newCell = Cell(holder.position.row + dr, holder.position.col + dc)
-        if (newCell.inBounds() && newCell !in doors && newCell != holder.position) {
+        if (newCell.inBounds(boardSize) && newCell !in doors && newCell != holder.position) {
             holder.position = newCell
             addLog("${holder.name} притянут к боссу гипнозом")
         }
@@ -833,7 +877,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
             var pos = p.position
             while (true) {
                 val next = Cell(pos.row + wall.vector.row, pos.col + wall.vector.col)
-                if (!next.inBounds() || next in doors) break
+                if (!next.inBounds(boardSize) || next in doors) break
                 pos = next
             }
             p.position = pos
@@ -856,7 +900,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
                 dCol != 0 -> Cell(p.position.row, p.position.col + (if (dCol > 0) 1 else -1))
                 else -> p.position
             }
-            if (newCell.inBounds() && newCell !in doors && newCell != p.position) {
+            if (newCell.inBounds(boardSize) && newCell !in doors && newCell != p.position) {
                 p.position = newCell
             }
         }
@@ -866,15 +910,18 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
     fun spawnPotionsAround(center: Cell) {
         val occupied = potions.map { it.position }.toSet()
         val newOnes = mutableListOf<Potion>()
-        center.neighbors8().forEach { cell ->
+        center.neighbors8(boardSize).forEach { cell ->
             if (cell !in occupied && cell !in doors) {
-                val source = cornerDecks.minByOrNull { manhattan(it.corner, cell) }?.source ?: DeckSource.BASE
+                val source = potionSourceAt(cell)
                 newOnes.add(Potion(cell, source, deck.draw(source)))
             }
         }
         potions = potions + newOnes
         addLog("Ящик зелий: появилось ${newOnes.size} новых зелий вокруг игрока")
     }
+
+    private fun potionSourceAt(cell: Cell): DeckSource =
+        cornerDecks.minBy { manhattan(it.corner, cell) }.source
 
     // Куколд: запускает ручное управление боссом на N ходов (N = бросок д4).
     // Сами ходы делаются по клику игрока на соседнюю клетку — см. playOneBossStepTo.
@@ -894,7 +941,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
         val dr = cell.row - boss.position.row
         val dc = cell.col - boss.position.col
         val isAdjacentStraight = (Math.abs(dr) == 1 && dc == 0) || (Math.abs(dc) == 1 && dr == 0)
-        if (!isAdjacentStraight || !cell.inBounds()) {
+        if (!isAdjacentStraight || !cell.inBounds(boardSize)) {
             addLog("Куколд: можно шагнуть только на соседнюю клетку по прямой")
             return
         }
@@ -947,7 +994,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
         val dr = cell.row - target.position.row
         val dc = cell.col - target.position.col
         val isAdjacentStraight = (Math.abs(dr) == 1 && dc == 0) || (Math.abs(dc) == 1 && dr == 0)
-        if (!isAdjacentStraight || !cell.inBounds() || cell in doors) {
+        if (!isAdjacentStraight || !cell.inBounds(boardSize) || cell in doors) {
             addLog("Кукловод: можно шагнуть только на соседнюю свободную клетку по прямой")
             return
         }
@@ -965,7 +1012,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
         var pos = from
         while (true) {
             val next = Cell(pos.row + direction.dr, pos.col + direction.dc)
-            if (!next.inBounds() || next in doors) return null to pos
+            if (!next.inBounds(boardSize) || next in doors) return null to pos
             val hitPlayer = players.find { it.alive && it.position == next }
             if (hitPlayer != null) return hitPlayer to next
             val hitBoss = bosses.find { it.position == next }
@@ -979,7 +1026,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
         var hit: BoardActor? = null
         while (true) {
             val next = Cell(pos.row + direction.dr, pos.col + direction.dc)
-            if (!next.inBounds() || next in doors) break
+            if (!next.inBounds(boardSize) || next in doors) break
             val hitPlayer = players.find { it.alive && it.position == next && it != player }
             val hitBoss = bosses.find { it.position == next }
             if (hitPlayer != null) { hit = hitPlayer; break }
@@ -991,7 +1038,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
                 player.position = pos
                 absorbHitOrElse(hit, "${hit.name}: щит поглотил таран ${player.name} и разрушился") {
                     val pushedCell = Cell(hit.position.row + direction.dr, hit.position.col + direction.dc)
-                    if (pushedCell.inBounds() && pushedCell !in doors) {
+                    if (pushedCell.inBounds(boardSize) && pushedCell !in doors) {
                         hit.position = pushedCell
                         checkBananaPeel(hit)
                     }
@@ -1003,7 +1050,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
             is BossUnit -> {
                 val pushedCell = Cell(hit.position.row + direction.dr, hit.position.col + direction.dc)
                 player.position = pos
-                if (pushedCell.inBounds() && pushedCell !in doors) moveBossTo(hit, pushedCell)
+                if (pushedCell.inBounds(boardSize) && pushedCell !in doors) moveBossTo(hit, pushedCell)
                 hit.stunnedTurns = maxOf(hit.stunnedTurns, 1)
                 addLog("${player.name} протаранил босса — тот оттолкнут и оглушён")
             }
@@ -1021,8 +1068,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
     fun bossAttackZoneCells(): Set<Cell> {
         val zone = mutableSetOf<Cell>()
         bosses.filter { it.stunnedTurns == 0 }.forEach { boss ->
-            for (r in 0 until BOARD_SIZE) for (c in 0 until BOARD_SIZE) {
-                val cell = Cell(r, c)
+            boardCells.forEach { cell ->
                 if (manhattan(boss.position, cell) <= bossAttackRadiusBonus) zone.add(cell)
             }
         }
@@ -1055,7 +1101,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
 
         if (bossDiagonalMovement && stepR != 0 && stepC != 0) {
             val cell = Cell(br + stepR, bc + stepC)
-            return if (cell.inBounds()) cell else boss.position
+            return if (cell.inBounds(boardSize)) cell else boss.position
         }
 
         return if (Math.abs(tr - br) == Math.abs(tc - bc) && (tr - br) != 0) {
@@ -1187,15 +1233,14 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
             }
             else -> Unit
         }
-        val targets = (0 until BOARD_SIZE).flatMap { row ->
-            (0 until BOARD_SIZE).map { col -> Cell(row, col) }
-        }.filter(::isBoardTarget)
+        val targets = boardCells.filter(::isBoardTarget)
         if (targets.isNotEmpty()) {
             val destination = if (hasPendingAction) {
                 targets.maxBy(::distanceFromBoss)
             } else if (player.botStyle == BotStyle.AGGRESSIVE) {
                 targets.minBy(::distanceFromBoss)
             } else {
+                val potionLandings = mutableMapOf<Triple<Cell, Direction?, Int>, Int>()
                 targets.maxWith(compareBy<Cell> { cell ->
                     if (player.botStyle == BotStyle.CAUTIOUS) return@compareBy -1
                     if (player.botStyle == BotStyle.TACTICAL && lastStepRisk(cell)) return@compareBy -1
@@ -1203,9 +1248,9 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
                         val direction = Direction.entries.first {
                             it.dr == cell.row - player.position.row && it.dc == cell.col - player.position.col
                         }
-                        bestPotionLanding(cell, direction, pendingSteps - 1)
+                        bestPotionLanding(cell, direction, pendingSteps - 1, potionLandings)
                     } else {
-                        bestPotionLanding(cell, null, 0)
+                        bestPotionLanding(cell, null, 0, potionLandings)
                     }
                 }.thenBy(::distanceFromBoss))
             }
@@ -1226,7 +1271,7 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
         else -> true
     }
 
-    internal fun occupiedAttackTargets(player: Player): List<Cell> = player.position.neighbors4().filter { cell ->
+    internal fun occupiedAttackTargets(player: Player): List<Cell> = player.position.neighbors4(boardSize).filter { cell ->
         bosses.any { it.position == cell } || players.any { it !== player && it.alive && it.position == cell }
     }
 
@@ -1236,15 +1281,20 @@ class GameEngine(private val dlcEnabled: Boolean, private val random: Random = R
             bossSpeedBonus * (if (bossDiagonalMovement) 2 else 1)
     }
 
-    private fun bestPotionLanding(cell: Cell, direction: Direction?, stepsLeft: Int): Int {
+    private fun bestPotionLanding(
+        cell: Cell, direction: Direction?, stepsLeft: Int,
+        results: MutableMap<Triple<Cell, Direction?, Int>, Int>
+    ): Int {
         if (cell in bananaPeels) return -1
         if (stepsLeft == 0) {
             return if (potions.any { it.position == cell }) distanceFromBoss(cell) else -1
         }
-        return Direction.entries.maxOf { next ->
-            val destination = Cell(cell.row + next.dr, cell.col + next.dc)
-            if (next == direction?.opposite() || !isWalkableCell(destination)) -1
-            else bestPotionLanding(destination, next, stepsLeft - 1)
+        return results.getOrPut(Triple(cell, direction, stepsLeft)) {
+            Direction.entries.maxOf { next ->
+                val destination = Cell(cell.row + next.dr, cell.col + next.dc)
+                if (next == direction?.opposite() || !isWalkableCell(destination)) -1
+                else bestPotionLanding(destination, next, stepsLeft - 1, results)
+            }
         }
     }
 

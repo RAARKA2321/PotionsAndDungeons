@@ -76,8 +76,8 @@ val playerPalette = listOf(
 )
 
 val CARD_DESCRIPTIONS: Map<CardId, String> = mapOf(
-    CardId.SPEED to "Постоянно добавляет 1 шаг к результату броска.",
-    CardId.SLOWDOWN to "Постоянно отнимает 1 шаг от броска. Если выпала единица, ход пропускается.",
+    CardId.SPEED to "Каждая «Скорость» постоянно добавляет 1 шаг к броску. Бонусы складываются с учётом замедления.",
+    CardId.SLOWDOWN to "Каждое «Замедление» постоянно отнимает 1 шаг от броска. Если после всех поправок шагов не осталось, ход пропускается.",
     CardId.SHIELD to "Защищает от одной атаки другого игрока или босса (оглушение, таран, пикси, укус оборотня, настигание боссом и тп.). Срабатывает автоматически и расходуется.",
     CardId.BROKEN_SHIELD to "Сразу ломает один щит. Если щита нет, ждёт его появления.",
     CardId.INVISIBILITY to "На 3 хода босс перестаёт выбирать тебя целью. В ход босса ты всё равно можешь получить удар в его зоне атаки.",
@@ -91,7 +91,7 @@ val CARD_DESCRIPTIONS: Map<CardId, String> = mapOf(
     CardId.EFFECT_SWAP to "Обменивает все эффекты зелий с выбранным игроком. Позиции, оглушение и карты в инвентаре остаются у своих владельцев.",
     CardId.REPEL to "Сдвигает ближайшего босса на клетку от тебя, в том числе по диагонали, если клетка свободна от других боссов и находится на поле.",
     CardId.HYPNOSIS to "Сдвигает тебя на клетку к ближайшему боссу. Возможен шаг по диагонали.",
-    CardId.IMMUNITY to "Защищает от зелий «Замедление», «Зловоние», «Стан», «Сломанный щит», «Даун», «Инвалидность» и «Проклятие».",
+    CardId.IMMUNITY to "Блокирует одно следующее зелье из списка: «Замедление», «Зловоние», «Стан», «Сломанный щит», «Даун», «Инвалидность», «Проклятие». После этого расходуется.",
     CardId.BOSS_DUPLICATION to "Навсегда добавляет на поле второго босса.",
     CardId.BOSS_BLINDNESS to "Все боссы пропускают следующий ход в конце раунда.",
     CardId.TELEPORT to "Выбери любую клетку без босса. На новой клетке можно попасть в зону атаки, наступить на кожурку или подобрать зелье.",
@@ -224,6 +224,19 @@ private fun RootScreen(session: GameSession) = with(session) {
     val preferences = rememberGamePreferences("avatars")
     var avatars by remember { mutableStateOf(preferences.values()) }
     var showAvatars by rememberSaveable { mutableStateOf(false) }
+    val cardsPreferences = rememberGamePreferences("custom_cards")
+    var customCards by remember(cardsPreferences) {
+        val saved = cardsPreferences.values()["cards"]
+        mutableStateOf(saved?.let { runCatching { readCustomCards(org.json.JSONArray(it)) }.getOrNull() }.orEmpty())
+    }
+    var showCustomCards by rememberSaveable { mutableStateOf(false) }
+    if (showCustomCards) {
+        CustomCardsScreen(customCards, onChange = { cards ->
+            cardsPreferences.put(mapOf("cards" to cards.toJson().toString()))
+            customCards = cards
+        }) { showCustomCards = false }
+        return@with
+    }
     val dicePreferences = rememberGamePreferences("dice_colors")
     var diceColors by remember {
         val dice = dicePreferences.values()
@@ -244,7 +257,7 @@ private fun RootScreen(session: GameSession) = with(session) {
         val onlineGame = room.engine
         if (onlineGame == null) {
             BackHandler { closeLanRoom() }
-            LanLobby(room, onBack = ::closeLanRoom)
+            LanLobby(room, customCards, onBack = ::closeLanRoom)
         } else {
             BackHandler { closeLanRoom() }
             key(onlineGame) {
@@ -268,6 +281,8 @@ private fun RootScreen(session: GameSession) = with(session) {
             onTutorial = { tutorialEngine = GameEngine(true).apply { setupTutorial() } },
             onOpenCardSandbox = ::openCardSandbox,
             onOpenLan = ::openLanRoom,
+            customCards = customCards,
+            onOpenCustomCards = { showCustomCards = true },
             onStart = { names, bots, rules -> startMatch(names, bots, dlcEnabled, rules) }
         )
     } else {
@@ -310,6 +325,8 @@ fun SetupScreen(
     onTutorial: () -> Unit,
     onOpenCardSandbox: () -> Unit,
     onOpenLan: () -> Unit,
+    customCards: List<CustomCard>,
+    onOpenCustomCards: () -> Unit,
     onStart: (List<String>, Set<Int>, CustomRules) -> Unit
 ) {
     val entrance = remember { Animatable(0f) }
@@ -322,6 +339,10 @@ fun SetupScreen(
     var cardTrading by rememberSaveable { mutableStateOf(false) }
     var bossDuel by rememberSaveable { mutableStateOf(false) }
     var daily by rememberSaveable { mutableStateOf(false) }
+    var boardSize by rememberSaveable { mutableIntStateOf(BOARD_SIZE) }
+    var potionPlacement by rememberSaveable { mutableStateOf(PotionPlacement.STANDARD) }
+    var includeCustomCards by rememberSaveable { mutableStateOf(false) }
+    val boardOptions = BoardOptions(boardSize, potionPlacement, if (includeCustomCards) customCards else emptyList())
     val solo = customParty && bossDuel
     var showCatalog by remember { mutableStateOf(false) }
     val version = appVersion()
@@ -371,6 +392,7 @@ fun SetupScreen(
         Button(onClick = { setupPage = 1 }, modifier = Modifier.fillMaxWidth()) { Text("Новая игра") }
         OutlinedButton(onClick = onOpenLan, modifier = Modifier.fillMaxWidth()) { Text("Сетевая игра") }
         TextButton(onClick = { showCatalog = true }) { Text("Справочник зелий") }
+        TextButton(onClick = onOpenCustomCards) { Text("Мои карты") }
         TextButton(onClick = {
             versionTaps++
             if (versionTaps == 7) {
@@ -382,6 +404,11 @@ fun SetupScreen(
 
         if (setupPage == 1) {
         Text("Настройки партии", fontSize = AppFonts.title, fontWeight = FontWeight.Bold)
+        BoardOptionsEditor(boardOptions, customCards) {
+            boardSize = it.size
+            potionPlacement = it.potionPlacement
+            includeCustomCards = it.customCards.isNotEmpty()
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(selected = !customParty, onClick = { customParty = false }, label = { Text("Обычная") })
             FilterChip(selected = customParty, onClick = { customParty = true }, label = { Text("Кастомная партия") })
@@ -467,8 +494,8 @@ fun SetupScreen(
             onClick = {
                 val finalNames = (0 until participants).map { i -> names[i].ifBlank { "Игрок ${i + 1}" } }
                 val rules = if (customParty) {
-                    CustomRules(choicePotions, breakableDoors, cardTrading && !solo, solo, daily)
-                } else CustomRules()
+                    CustomRules(choicePotions, breakableDoors, cardTrading && !solo, solo, daily, boardOptions)
+                } else CustomRules(board = boardOptions)
                 val bots = if (solo) emptySet() else (playerCount - botCount until playerCount).toSet()
                 onStart(finalNames, bots, rules)
             },
@@ -480,7 +507,7 @@ fun SetupScreen(
 
 }
 @Composable
-private fun CustomRuleSwitch(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+internal fun CustomRuleSwitch(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(label, modifier = Modifier.weight(1f))
         Switch(checked = checked, onCheckedChange = onCheckedChange, modifier = Modifier.semantics {
@@ -563,15 +590,15 @@ internal fun GameScreen(
             diceCaption = null
             diceVisible = true
             scope.launch {
-                val slow = player?.effects?.has(CardId.SLOWDOWN) == true
-                val fast = player?.effects?.has(CardId.SPEED) == true
+                val slow = player?.let { engine.movementEffectCount(it, CardId.SLOWDOWN) } ?: 0
+                val fast = player?.let { engine.movementEffectCount(it, CardId.SPEED) } ?: 0
                 delay(900)
                 val finalSteps = perform(if (reroll) MatchAction.REROLL else MatchAction.ROLL_INLINE, 0, 0)
                 diceResult = engine.lastDiceRoll
                 delay(700)
-                if (!engine.awaitingRollDecision && (slow || fast)) {
-                    diceCaption = if (slow && diceResult == 1) "Замедление: ход пропущен" else
-                        listOfNotNull(if (slow) "−1 Замедление" else null, if (fast) "+1 Скорость" else null).joinToString(" · ")
+                if (!engine.awaitingRollDecision && (slow > 0 || fast > 0)) {
+                    diceCaption = if (finalSteps == 0) "Замедление: ход пропущен" else
+                        listOfNotNull(if (slow > 0) "−$slow Замедление" else null, if (fast > 0) "+$fast Скорость" else null).joinToString(" · ")
                     diceStage++
                     diceResult = -1
                     delay(900)
@@ -586,6 +613,19 @@ internal fun GameScreen(
 
     val tutorialFinished = engine.tutorial && engine.bossMoveTrigger >= 2 && !engine.awaitingBossMove
     val botTurn = engine.turnOrder.getOrNull(engine.currentTurnIndex)?.isBot == true
+    MovementKeyHandler { direction ->
+        if (diceVisible || lan?.canAct == false || attackPreview != null || showInventoryFor != null ||
+            showGameMenu || showLog || showRules || confirmRestart
+        ) {
+            false
+        } else {
+            val target = engine.directionalMoveTarget(direction)
+            if (target != null) {
+                perform(MatchAction.CELL, target.row, target.col)
+                true
+            } else false
+        }
+    }
     LaunchedEffect(engine, botTurn, engine.awaitingBossMove, engine.gameOver, engine.cardReveal, engine.d4Rolls.size, diceVisible, showGameMenu, showLog, showRules, confirmRestart) {
         if (botTurn && !diceVisible && !showGameMenu && !showLog && !showRules && !confirmRestart) {
             while (!engine.gameOver && !engine.awaitingBossMove && engine.cardReveal == null &&
@@ -650,7 +690,7 @@ internal fun GameScreen(
                 Button(onClick = onOpenSettings) { Text("Завершить обучение") }
             }
             Spacer(Modifier.height(12.dp))
-            PlayersRow(engine, onPlayerClick = { player ->
+            PlayersRow(engine, lan?.avatars, onPlayerClick = { player ->
                 if (!localInput || botTurn || diceVisible || attackPreview != null) return@PlayersRow
                 if (engine.pendingChoice is PendingChoice.ChoosePlayer) {
                     perform(MatchAction.PLAYER, engine.players.indexOf(player), 0)
@@ -661,7 +701,7 @@ internal fun GameScreen(
 
             Spacer(Modifier.height(8.dp))
             Box(modifier = Modifier.height(boardSize).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                BoardView(engine, attackPreview, inputEnabled = !diceVisible && localInput)
+                BoardView(engine, attackPreview, inputEnabled = !diceVisible && localInput, onlineAvatars = lan?.avatars)
                 if (diceVisible) key(diceStage) { DiceRollOverlay(diceResult, diceCaption, diceSides) }
                 if (!diceVisible && lan?.paused != true && engine.d4Rolls.isNotEmpty()) {
                     key(engine.d4Sequence) {
@@ -890,6 +930,7 @@ private fun RulesDialog(onDismiss: () -> Unit) {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("Цель — остаться последним игроком на поле.")
                 Text("Брось кубик и двигайся по выделенным клеткам. Ходи по горизонтали или вертикали. Сразу вернуться на предыдущую клетку нельзя.")
+                if (supportsMovementKeys) Text("После броска можно двигаться клавишами WASD. Для хода конём выбери клетку мышью.")
                 Text("Если закончишь движение на клетке с флаконом, подберёшь зелье. Округлые флаконы — базовая колода, угловатые — DLC. В партии с DLC клетку босса нужно обходить. Некоторые карты попадают в руку. Их можно разыграть в начале своего хода. После «Атаки», «Пикси» или «Тарана» можно походить.")
                 Text("Босс атакует только в свой ход. Красные клетки показывают зону его атаки.")
                 Text("Если игра просит выбрать цель, нажми на клетку с золотым контуром или на выделенного игрока над полем.")
@@ -909,7 +950,7 @@ fun IconTextButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
 }
 
 @Composable
-fun PlayersRow(engine: GameEngine, onPlayerClick: (Player) -> Unit) {
+internal fun PlayersRow(engine: GameEngine, onlineAvatars: Map<Int, LanAvatar>? = null, onPlayerClick: (Player) -> Unit) {
     Row(modifier = Modifier.fillMaxWidth().height(100.dp).horizontalScroll(rememberScrollState())) {
         engine.players.forEachIndexed { index, p ->
             val color = playerPalette[index % playerPalette.size]
@@ -934,7 +975,12 @@ fun PlayersRow(engine: GameEngine, onPlayerClick: (Player) -> Unit) {
                     .padding(8.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(modifier = Modifier.size(12.dp).background(color, shape = CircleShape))
+                    val avatar = onlineAvatars?.get(index)
+                    if (avatar == null) {
+                        Box(modifier = Modifier.size(12.dp).background(color, shape = CircleShape))
+                    } else {
+                        LanAvatarImage(avatar, Modifier.size(24.dp))
+                    }
                     Spacer(Modifier.width(6.dp))
                     Text(
                         text = if (p.alive) (if (p.isBot) "${p.name} · бот" else p.name) else "${p.name} (выбыл)",
@@ -1062,7 +1108,10 @@ private val cellGap = 4.dp
 private val boardMargin = 4.dp
 
 @Composable
-fun BoardView(engine: GameEngine, attackPreview: Pair<Player, CardId>? = null, inputEnabled: Boolean = true) {
+internal fun BoardView(
+    engine: GameEngine, attackPreview: Pair<Player, CardId>? = null, inputEnabled: Boolean = true,
+    onlineAvatars: Map<Int, LanAvatar>? = null
+) {
     val perform = matchActions(engine)
     val attackZone = engine.bossAttackZoneCells()
     val previewCells = attackPreview?.let { (player, card) ->
@@ -1081,10 +1130,11 @@ fun BoardView(engine: GameEngine, attackPreview: Pair<Player, CardId>? = null, i
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         val available = (minOf(maxWidth, maxHeight) - boardMargin * 2).coerceAtLeast(0.dp)
-        val step = available / BOARD_SIZE
+        val size = engine.boardSize
+        val step = available / size
         val cellSize = (step - cellGap).coerceAtLeast(0.dp)
-        val boardSize = step * BOARD_SIZE
-        val mid = BOARD_SIZE / 2
+        val boardSize = step * size
+        val mid = size / 2
 
         Box(
             modifier = Modifier
@@ -1092,12 +1142,10 @@ fun BoardView(engine: GameEngine, attackPreview: Pair<Player, CardId>? = null, i
                 .shadow(12.dp, RoundedCornerShape(14.dp))
                 .background(AppColors.boardBg, shape = RoundedCornerShape(14.dp))
         ) {
-            for (r in 0 until BOARD_SIZE) {
-                for (c in 0 until BOARD_SIZE) {
+            for (r in 0 until size) {
+                for (c in 0 until size) {
                     val cell = Cell(r, c)
-                    val selectable = inputEnabled && attackPreview == null && engine.isBoardTarget(cell) &&
-                        engine.turnOrder.getOrNull(engine.currentTurnIndex)?.isBot != true &&
-                        (!engine.tutorial || if (engine.pendingChoice != null) engine.bosses.any { it.position == cell } else engine.attackCardPlayed || cell == Cell(0, 1))
+                    val selectable = inputEnabled && attackPreview == null && engine.isSelectableBoardCell(cell)
                     val dangerous = cell in attackZone
                     val door = cell in engine.doors
                     val duelKey = cell in engine.duelKeys
@@ -1133,7 +1181,7 @@ fun BoardView(engine: GameEngine, attackPreview: Pair<Player, CardId>? = null, i
                                     if (dangerous) append(", зона атаки")
                                     if (risky) append(", босс может достать в конце раунда")
                                     if (cell in engine.bananaPeels) append(", кожурка")
-                                    if (potion != null) append(if (potion.revealed) ", ${potion.cardId.displayName()}" else ", закрытое зелье")
+                                    if (potion != null) append(if (potion.revealed) ", ${potion.card.name}" else ", закрытое зелье")
                                     engine.players.filter { it.alive && it.position == cell }.forEach { append(", ${it.name}") }
                                 }
                             }
@@ -1152,13 +1200,13 @@ fun BoardView(engine: GameEngine, attackPreview: Pair<Player, CardId>? = null, i
             Box(modifier = Modifier.offset(x = step * mid, y = 0.dp).size(cellSize), contentAlignment = Alignment.TopCenter) {
                 Text("1", color = AppColors.wallNumber, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 2.dp))
             }
-            Box(modifier = Modifier.offset(x = step * mid, y = step * (BOARD_SIZE - 1)).size(cellSize), contentAlignment = Alignment.BottomCenter) {
+            Box(modifier = Modifier.offset(x = step * mid, y = step * (size - 1)).size(cellSize), contentAlignment = Alignment.BottomCenter) {
                 Text("3", color = AppColors.wallNumber, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 2.dp))
             }
             Box(modifier = Modifier.offset(x = 0.dp, y = step * mid).size(cellSize), contentAlignment = Alignment.CenterStart) {
                 Text("4", color = AppColors.wallNumber, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 2.dp))
             }
-            Box(modifier = Modifier.offset(x = step * (BOARD_SIZE - 1), y = step * mid).size(cellSize), contentAlignment = Alignment.CenterEnd) {
+            Box(modifier = Modifier.offset(x = step * (size - 1), y = step * mid).size(cellSize), contentAlignment = Alignment.CenterEnd) {
                 Text("2", color = AppColors.wallNumber, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(end = 2.dp))
             }
 
@@ -1171,13 +1219,17 @@ fun BoardView(engine: GameEngine, attackPreview: Pair<Player, CardId>? = null, i
                 }
             }
 
-            engine.potions.forEach { potion -> key(potion) { PotionView(potion, step, cellSize) } }
+            engine.potions.forEach { potion -> key(potion) { PotionView(potion, step, cellSize, size) } }
 
             engine.players.filter { it.alive }.forEach { player ->
                 val idx = engine.players.indexOf(player)
                 val color = playerPalette[idx % playerPalette.size]
                 val isCurrent = engine.turnOrder.getOrNull(engine.currentTurnIndex) == player && !engine.gameOver
-                key(player) { PlayerView(player, color, isCurrent, step, cellSize, "player$idx") }
+                key(player) {
+                    PlayerView(player, color, isCurrent, step, cellSize,
+                        avatarKey = if (onlineAvatars == null) "player$idx" else null,
+                        onlineAvatar = onlineAvatars?.get(idx))
+                }
             }
 
             engine.bosses.forEach { boss -> key(boss.slot) { BossView(boss, step, cellSize) } }
@@ -1187,9 +1239,11 @@ fun BoardView(engine: GameEngine, attackPreview: Pair<Player, CardId>? = null, i
 
 
 
-
 @Composable
-fun PlayerView(player: Player, color: Color, isCurrent: Boolean, step: androidx.compose.ui.unit.Dp, cellSize: androidx.compose.ui.unit.Dp, avatarKey: String) {
+internal fun PlayerView(
+    player: Player, color: Color, isCurrent: Boolean, step: androidx.compose.ui.unit.Dp,
+    cellSize: androidx.compose.ui.unit.Dp, avatarKey: String?, onlineAvatar: LanAvatar?
+) {
     val animX by animateDpAsState(targetValue = step * player.position.col, animationSpec = tween(300))
     val animY by animateDpAsState(targetValue = step * player.position.row, animationSpec = tween(300))
     Box(modifier = Modifier.offset { IntOffset(animX.roundToPx(), animY.roundToPx()) }.size(cellSize), contentAlignment = Alignment.Center) {
@@ -1205,7 +1259,8 @@ fun PlayerView(player: Player, color: Color, isCurrent: Boolean, step: androidx.
             contentAlignment = Alignment.Center
         ) {
             Text(player.name.first().toString(), color = AppColors.darkTextOnAccent, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            AvatarImage(avatarKey, Modifier.fillMaxSize())
+            avatarKey?.let { AvatarImage(it, Modifier.fillMaxSize()) }
+            onlineAvatar?.let { LanAvatarImage(it, Modifier.fillMaxSize()) }
         }
         if (player.stunnedTurns > 0) {
             Text("💫", fontSize = 13.sp, modifier = Modifier.offset(y = (-20).dp))
@@ -1230,7 +1285,7 @@ fun BossView(boss: BossUnit, step: androidx.compose.ui.unit.Dp, cellSize: androi
 }
 
 @Composable
-fun PotionView(potion: Potion, step: androidx.compose.ui.unit.Dp, cellSize: androidx.compose.ui.unit.Dp) {
+fun PotionView(potion: Potion, step: androidx.compose.ui.unit.Dp, cellSize: androidx.compose.ui.unit.Dp, boardSize: Int = BOARD_SIZE) {
     val scale = remember { Animatable(1f) }
     LaunchedEffect(potion.usedTrigger) {
         if (potion.usedTrigger > 0) {
@@ -1249,9 +1304,9 @@ fun PotionView(potion: Potion, step: androidx.compose.ui.unit.Dp, cellSize: andr
             contentAlignment = Alignment.Center
         ) {
             if (potion.revealed) {
-                Text(potion.cardId.displayName(), color = Color.White, fontSize = 7.sp)
+                Text(potion.card.name, color = Color.White, fontSize = 7.sp)
             } else {
-                PotionIcon(potion.source, (potion.position.row * BOARD_SIZE + potion.position.col) % 4, Modifier.fillMaxSize())
+                PotionIcon(potion.source, (potion.position.row * boardSize + potion.position.col) % 4, Modifier.fillMaxSize())
             }
         }
     }
@@ -1313,11 +1368,11 @@ fun InventoryDialog(engine: GameEngine, player: Player, onDismiss: () -> Unit, o
 }
 
 @Composable
-fun CardCatalogScreen(onSelectCard: ((CardId) -> Unit)? = null, onDismiss: () -> Unit) {
+fun CardCatalogScreen(onSelectCard: ((CardId) -> Unit)? = null, pickupOnly: Boolean = false, onDismiss: () -> Unit) {
     var query by rememberSaveable { mutableStateOf("") }
     var deckFilter by rememberSaveable { mutableStateOf<DeckSource?>(null) }
     val matchingCards = CardId.entries.filter { card ->
-        (deckFilter == null || card.isDlc == (deckFilter == DeckSource.DLC)) &&
+        (!pickupOnly || !card.isActive) && (deckFilter == null || card.isDlc == (deckFilter == DeckSource.DLC)) &&
             card.displayName().contains(query.trim(), ignoreCase = true)
     }
     BackHandler(onBack = onDismiss)
@@ -1377,10 +1432,11 @@ private fun CardRevealDialog(event: CardRevealEvent, onChoice: (Boolean) -> Unit
     val reward = event.card.choiceReward
     AlertDialog(
         onDismissRequest = {},
-        title = { Text(event.card.displayName()) },
+        title = { Text(event.customCard?.name ?: event.card.displayName()) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Подобрал: ${event.playerName}", color = AppColors.accent)
+                event.customCard?.flavor?.takeIf { it.isNotBlank() }?.let { Text(it, color = AppColors.textMuted) }
                 Text(CARD_DESCRIPTIONS.getValue(event.card))
                 if (event.card.isActive) Text("Карта в руке. Её можно разыграть в начале своего хода.")
             }

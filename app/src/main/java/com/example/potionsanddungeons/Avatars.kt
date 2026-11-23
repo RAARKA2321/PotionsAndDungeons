@@ -1,6 +1,7 @@
 package com.example.potionsanddungeons
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -15,6 +16,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Paint
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
@@ -52,17 +55,66 @@ private data class AvatarCrop(
 @Composable
 private fun CroppedAvatar(bitmap: ImageBitmap, crop: AvatarCrop, modifier: Modifier) {
     Canvas(modifier.clip(CircleShape)) {
-        val bounded = crop.constrained(bitmap)
-        val side = (min(bitmap.width, bitmap.height) / bounded.zoom).roundToInt().coerceAtLeast(1)
-        val left = (bounded.x * bitmap.width - side / 2f).roundToInt().coerceIn(0, bitmap.width - side)
-        val top = (bounded.y * bitmap.height - side / 2f).roundToInt().coerceIn(0, bitmap.height - side)
-        drawImage(
-            image = bitmap,
-            srcOffset = IntOffset(left, top),
-            srcSize = IntSize(side, side),
-            dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt())
-        )
+        val (offset, cropSize) = avatarBounds(bitmap, crop)
+        drawImage(bitmap, srcOffset = offset, srcSize = cropSize,
+            dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()))
     }
+}
+
+private fun avatarBounds(bitmap: ImageBitmap, crop: AvatarCrop): Pair<IntOffset, IntSize> {
+    val bounded = crop.constrained(bitmap)
+    val side = (min(bitmap.width, bitmap.height) / bounded.zoom).roundToInt().coerceAtLeast(1)
+    val left = (bounded.x * bitmap.width - side / 2f).roundToInt().coerceIn(0, bitmap.width - side)
+    val top = (bounded.y * bitmap.height - side / 2f).roundToInt().coerceIn(0, bitmap.height - side)
+    return IntOffset(left, top) to IntSize(side, side)
+}
+
+@Composable
+internal fun loadLanAvatar(saved: String): LanAvatar? = key(saved) {
+    val crop = remember { AvatarCrop.decode(saved) }
+    val bitmap by loadAvatar(crop.uri, 768)
+    remember(bitmap) {
+        bitmap?.let { source ->
+            val (offset, cropSize) = avatarBounds(source, crop)
+            val size = LAN_AVATAR_SIZE
+            val thumbnail = ImageBitmap(size, size)
+            androidx.compose.ui.graphics.Canvas(thumbnail).drawImageRect(
+                source, offset, cropSize, IntOffset.Zero, IntSize(size, size), Paint()
+            )
+            val pixels = IntArray(size * size)
+            thumbnail.readPixels(pixels)
+            LanAvatar.fromPixels(pixels)
+        }
+    }
+}
+
+@Composable
+internal fun LanAvatarImage(avatar: LanAvatar, modifier: Modifier) {
+    val bitmap = remember(avatar) { lanAvatarBitmap(avatar.pixels()) }
+    Image(bitmap, contentDescription = null, modifier = modifier.clip(CircleShape), contentScale = ContentScale.FillBounds)
+}
+
+@Composable
+internal fun LanAvatarPicker(saved: String?, avatar: LanAvatar?, enabled: Boolean, onChanged: (String?) -> Unit) {
+    var pendingCrop by rememberSaveable { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf(false) }
+    val pick = rememberAvatarPicker { path -> pendingCrop = AvatarCrop(path).encode() }
+    val retain = rememberAvatarPermission()
+    pendingCrop?.let { value ->
+        AvatarCropDialog(AvatarCrop.decode(value), onDismiss = { pendingCrop = null }) { crop ->
+            error = runCatching { retain(crop.uri) }.isFailure
+            if (!error) onChanged(crop.encode())
+            pendingCrop = null
+        }
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        if (avatar != null) LanAvatarImage(avatar, Modifier.size(36.dp))
+        TextButton(onClick = pick, enabled = enabled) { Text(if (saved == null) "Выбрать аватарку" else "Сменить фото") }
+        if (saved != null) TextButton(onClick = { onChanged(null); error = false }, enabled = enabled) { Text("Убрать") }
+    }
+    Text("Аватарку увидят участники комнаты.", color = AppColors.textMuted)
+    if (saved != null && avatar == null) Text("Дождись предпросмотра или убери фото.")
+    if (error) Text("Не удалось сохранить фото. Выбери его ещё раз.")
 }
 
 @Composable

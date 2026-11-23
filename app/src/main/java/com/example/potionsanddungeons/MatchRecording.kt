@@ -23,7 +23,7 @@ internal class MatchRecording(
     val bots: Set<Int>,
     val dlc: Boolean,
     private val seed: Int = Random.nextInt(),
-    private val version: Int = 7,
+    private val version: Int = 9,
     private val legacyStyle: BotStyle? = null,
     val customRules: CustomRules = CustomRules(),
     val dailyDate: String? = null
@@ -31,7 +31,7 @@ internal class MatchRecording(
     private val actions = JSONArray()
     private val matchRandom = Random(seed)
     val engine = GameEngine(dlc, matchRandom, animateD4 = true, offerReroll = true, legacyAttackTurns = version == 1, legacyBossCrossing = version < 4, customRules = customRules,
-        movementRandom = if (dailyDate != null) Random(seed xor 0x345217AC) else matchRandom).apply {
+        movementRandom = if (dailyDate != null) Random(seed xor 0x345217AC) else matchRandom, legacyPotionRules = version < 8).apply {
         setupGame(names, bots)
         val tacticRandom = Random(seed.inv())
         players.filter { it.isBot }.forEach { bot ->
@@ -54,6 +54,7 @@ internal class MatchRecording(
             .put("breakableDoors", customRules.breakableDoors)
             .put("cardTrading", customRules.cardTrading)
             .put("bossDuel", customRules.bossDuel)
+            .put("board", customRules.board.toJson())
             .put("dailyDate", dailyDate)
             .put("style", legacyStyle?.name)
             .put("seed", seed)
@@ -64,7 +65,7 @@ internal class MatchRecording(
 
         fun restore(json: JSONObject): MatchRecording {
             val version = json.getInt("version")
-            require(version in 1..7)
+            require(version in 1..9)
             val names = json.getJSONArray("names")
             val bots = json.getJSONArray("bots")
             val date = json.optString("dailyDate").ifEmpty { null }
@@ -80,7 +81,8 @@ internal class MatchRecording(
                     breakableDoors = json.optBoolean("breakableDoors"),
                     cardTrading = json.optBoolean("cardTrading"),
                     bossDuel = json.optBoolean("bossDuel"),
-                    daily = date != null
+                    daily = date != null,
+                    board = readBoardOptions(json.optJSONObject("board"))
                 ),
                 date
             )

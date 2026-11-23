@@ -30,7 +30,7 @@ import java.util.Locale
 import java.util.UUID
 
 private const val PORT = 48473
-private const val PROTOCOL = 1
+private const val PROTOCOL = 2
 private const val MAX_FRAME = 2 * 1024 * 1024
 
 internal fun readLanFrame(input: DataInputStream): String {
@@ -62,10 +62,10 @@ private class Connection(val socket: Socket) {
 
 internal data class LanRoll(val revision: Int, val value: Int, val sides: Int)
 
-internal class LanRoom {
+internal class LanRoom(private val resolveIpv4: (String) -> InetAddress? = ::parseIpv4) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val connections = mutableSetOf<Connection>()
-    private data class Seat(val name: String, val token: String, var connection: Connection?)
+    private data class Seat(val name: String, val token: String, var connection: Connection?, val avatar: LanAvatar?)
     private val seats = mutableListOf<Seat>()
     private var server: ServerSocket? = null
     private var relayControl: Socket? = null
@@ -78,6 +78,7 @@ internal class LanRoom {
     private var address = ""
     private var joinName = ""
     private var joinCode = ""
+    private var localAvatar: LanAvatar? = null
     private var waitingForReply by mutableStateOf(false)
     private var driving: Job? = null
     private var closed = false
@@ -96,6 +97,12 @@ internal class LanRoom {
         private set
     var names by mutableStateOf(emptyList<String>())
         private set
+    var avatars by mutableStateOf(emptyMap<Int, LanAvatar>())
+        private set
+    var dlcEnabled by mutableStateOf(false)
+        private set
+    var boardOptions by mutableStateOf(BoardOptions())
+        private set
     var status by mutableStateOf("")
         private set
     var seat by mutableStateOf(-1)
@@ -109,15 +116,16 @@ internal class LanRoom {
         get() = connected && !paused && !waitingForReply &&
             engine?.let { game -> game.turnOrder.getOrNull(game.currentTurnIndex) === game.players.getOrNull(seat) } == true
 
-    fun host(name: String, vpnAddress: String? = null) {
+    fun host(name: String, vpnAddress: String? = null, avatar: LanAvatar? = null) {
         if (busy || connected) return
+        localAvatar = avatar
         hosting = true
         busy = true
         status = "Создаю комнату…"
         scope.launch {
             try {
                 val vpnIp = vpnAddress?.let {
-                    parseIpv4(it.trim()) ?: throw IOException("Invalid VPN IPv4 address")
+                    resolveIpv4(it.trim()) ?: throw IOException("Invalid VPN IPv4 address")
                 }
                 val listener = withContext(Dispatchers.IO) {
                     // Userspace VPNs can forward incoming traffic to loopback.
@@ -157,8 +165,9 @@ internal class LanRoom {
         }
     }
 
-    fun hostOnline(endpoint: String, name: String) {
+    fun hostOnline(endpoint: String, name: String, avatar: LanAvatar? = null) {
         if (busy || connected) return
+        localAvatar = avatar
         hosting = true
         busy = true
         status = "Создаю онлайн-комнату…"
@@ -221,15 +230,17 @@ internal class LanRoom {
     private fun openRoom(name: String, code: String) {
         roomCode = code
         seat = 0
-        seats.add(Seat(cleanName(name, 0), token, null))
+        seats.add(Seat(cleanName(name, 0), token, null, localAvatar))
         names = seats.map { it.name }
+        updateAvatars()
         connected = true
         busy = false
         status = "Ожидаем игроков"
     }
 
-    fun join(host: String, code: String, name: String, viaVpn: Boolean = false) {
+    fun join(host: String, code: String, name: String, viaVpn: Boolean = false, avatar: LanAvatar? = null) {
         if (busy || connected || hosting) return
+        localAvatar = avatar
         relay = null
         joiningViaVpn = viaVpn
         address = host.trim()
@@ -238,8 +249,9 @@ internal class LanRoom {
         connect()
     }
 
-    fun joinOnline(endpoint: String, code: String, name: String) {
+    fun joinOnline(endpoint: String, code: String, name: String, avatar: LanAvatar? = null) {
         if (busy || connected || hosting) return
+        localAvatar = avatar
         address = endpoint.trim()
         relay = InternetRelay(address)
         joinCode = code.trim()
@@ -260,7 +272,7 @@ internal class LanRoom {
             try {
                 val socket = withContext(Dispatchers.IO) {
                     if (service == null) {
-                        val ip = parseIpv4(address)?.takeIf { joiningViaVpn || it.isSiteLocalAddress }
+                        val ip = resolveIpv4(address)?.takeIf { joiningViaVpn || it.isSiteLocalAddress }
                             ?: throw IOException("Invalid room IPv4 address")
                         Socket().also {
                             opened = it
@@ -280,7 +292,8 @@ internal class LanRoom {
                 attach(connection)
                 opened = null
                 connection.send(JSONObject().put("type", "join").put("protocol", PROTOCOL)
-                    .put("code", joinCode).put("token", token).put("name", joinName))
+                    .put("code", joinCode).put("token", token).put("name", joinName)
+                    .put("avatar", localAvatar?.encoded))
             } catch (_: IOException) {
                 busy = false
                 status = when {
@@ -357,7 +370,8 @@ internal class LanRoom {
                     seats[old].connection?.close()
                     seats[old].connection = connection
                 } else {
-                    seats.add(Seat(cleanName(message.optString("name"), slot), guestToken, connection))
+                    seats.add(Seat(cleanName(message.optString("name"), slot), guestToken, connection,
+                        LanAvatar.parse(message.opt("avatar") as? String)))
                 }
                 connection.send(JSONObject().put("type", "welcome").put("seat", slot))
                 sendSnapshot(connection)
@@ -388,6 +402,14 @@ internal class LanRoom {
             "room" -> {
                 val roster = message.getJSONArray("names")
                 names = List(roster.length(), roster::getString)
+                val images = message.optJSONObject("avatars")
+                avatars = buildMap {
+                    for (index in 0 until minOf(names.size, 4)) {
+                        LanAvatar.parse(images?.opt(index.toString()) as? String)?.let { put(index, it) }
+                    }
+                }
+                dlcEnabled = message.optBoolean("dlc")
+                boardOptions = readBoardOptions(message.optJSONObject("board"))
                 paused = message.getBoolean("paused")
                 status = if (paused) "Партия на паузе. Ждём переподключения." else "Подключено"
             }
@@ -395,6 +417,7 @@ internal class LanRoom {
                 val recording = MatchRecording.restore(message.getJSONObject("match"))
                 match = recording
                 engine = recording.engine
+                boardOptions = recording.customRules.board
                 revision = message.getInt("revision")
                 waitingForReply = false
                 lastRoll = null
@@ -442,12 +465,34 @@ internal class LanRoom {
         }
     }
 
+    private fun updateAvatars() {
+        avatars = buildMap {
+            seats.forEachIndexed { index, seat -> seat.avatar?.let { put(index, it) } }
+        }
+    }
+
     private fun broadcastRoom() {
         names = seats.map { it.name }
+        updateAvatars()
         paused = seats.drop(1).any { it.connection == null }
         status = if (paused) "Ждём переподключения игрока" else "Комната открыта"
-        broadcast(JSONObject().put("type", "room").put("names", JSONArray(names)).put("paused", paused))
+        val images = JSONObject()
+        avatars.forEach { (index, avatar) -> images.put(index.toString(), avatar.encoded) }
+        broadcast(JSONObject().put("type", "room").put("names", JSONArray(names)).put("paused", paused)
+            .put("avatars", images).put("dlc", dlcEnabled).put("board", boardOptions.toJson()))
         driveHost()
+    }
+
+    fun configureDlc(enabled: Boolean) {
+        if (!hosting || !connected || match != null || dlcEnabled == enabled) return
+        dlcEnabled = enabled
+        broadcastRoom()
+    }
+
+    fun configureBoard(options: BoardOptions) {
+        if (!hosting || !connected || match != null || boardOptions == options) return
+        boardOptions = options
+        broadcastRoom()
     }
 
     fun start() {
@@ -469,7 +514,7 @@ internal class LanRoom {
         driving?.cancel()
         driving = null
         lastRoll = null
-        val recording = MatchRecording(names, emptySet(), false)
+        val recording = MatchRecording(names, emptySet(), dlcEnabled, customRules = CustomRules(board = boardOptions))
         match = recording
         engine = recording.engine
         seats.mapNotNull { it.connection }.forEach(::sendSnapshot)
@@ -570,10 +615,11 @@ internal class LanRoom {
             .firstOrNull { it.address.size == 4 && it.isSiteLocalAddress }
     }
 
-    private fun parseIpv4(host: String): InetAddress? {
-        val parts = host.split('.').map { it.toIntOrNull() }
-        if (parts.size != 4 || parts.any { it == null || it !in 0..255 }) return null
-        return InetAddress.getByAddress(parts.map { checkNotNull(it).toByte() }.toByteArray())
-            .takeUnless { it.isAnyLocalAddress || it.isMulticastAddress || it.isLoopbackAddress }
-    }
+}
+
+private fun parseIpv4(host: String): InetAddress? {
+    val parts = host.split('.').map { it.toIntOrNull() }
+    if (parts.size != 4 || parts.any { it == null || it !in 0..255 }) return null
+    return InetAddress.getByAddress(parts.map { checkNotNull(it).toByte() }.toByteArray())
+        .takeUnless { it.isAnyLocalAddress || it.isMulticastAddress || it.isLoopbackAddress }
 }

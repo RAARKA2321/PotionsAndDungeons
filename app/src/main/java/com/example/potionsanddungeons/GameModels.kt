@@ -32,16 +32,24 @@ enum class Wall(val number: Int, val vector: Cell) {
 }
 
 const val BOARD_SIZE = 5
-val CENTER = Cell(2, 2)
-val CORNERS = listOf(Cell(0, 0), Cell(4, 4), Cell(0, 4), Cell(4, 0))
+val CENTER = boardCenter(BOARD_SIZE)
+val CORNERS = boardCorners(BOARD_SIZE)
 
-fun diagonalCellsFromCorner(corner: Cell): List<Cell> {
+fun boardCenter(size: Int) = Cell(size / 2, size / 2)
+
+fun boardCorners(size: Int): List<Cell> {
+    val edge = size - 1
+    return listOf(Cell(0, 0), Cell(edge, edge), Cell(0, edge), Cell(edge, 0))
+}
+
+fun diagonalCellsFromCorner(corner: Cell, boardSize: Int = BOARD_SIZE): List<Cell> {
     val dr = if (corner.row == 0) 1 else -1
     val dc = if (corner.col == 0) 1 else -1
     val cells = mutableListOf<Cell>()
     var r = corner.row + dr
     var c = corner.col + dc
-    while (r in 0 until BOARD_SIZE && c in 0 until BOARD_SIZE && Cell(r, c) != CENTER) {
+    val center = boardCenter(boardSize)
+    while (Cell(r, c).inBounds(boardSize) && Cell(r, c) != center) {
         cells.add(Cell(r, c))
         r += dr
         c += dc
@@ -49,19 +57,20 @@ fun diagonalCellsFromCorner(corner: Cell): List<Cell> {
     return cells
 }
 
-fun Cell.inBounds() = row in 0 until BOARD_SIZE && col in 0 until BOARD_SIZE
+fun Cell.inBounds(boardSize: Int = BOARD_SIZE) = row in 0 until boardSize && col in 0 until boardSize
 
-fun Cell.neighbors8(): List<Cell> {
+fun Cell.neighbors8(boardSize: Int = BOARD_SIZE): List<Cell> {
     val result = mutableListOf<Cell>()
     for (dr in -1..1) for (dc in -1..1) {
         if (dr == 0 && dc == 0) continue
         val n = Cell(row + dr, col + dc)
-        if (n.inBounds()) result.add(n)
+        if (n.inBounds(boardSize)) result.add(n)
     }
     return result
 }
 
-fun Cell.neighbors4() = Direction.entries.map { Cell(row + it.dr, col + it.dc) }.filter { it.inBounds() }
+fun Cell.neighbors4(boardSize: Int = BOARD_SIZE) =
+    Direction.entries.map { Cell(row + it.dr, col + it.dc) }.filter { it.inBounds(boardSize) }
 
 interface BoardActor {
     var position: Cell
@@ -132,8 +141,42 @@ data class CustomRules(
     val breakableDoors: Boolean = false,
     val cardTrading: Boolean = false,
     val bossDuel: Boolean = false,
-    val daily: Boolean = false
+    val daily: Boolean = false,
+    val board: BoardOptions = BoardOptions()
 )
+
+enum class PotionPlacement(val label: String) {
+    STANDARD("Обычное поле"),
+    RANDOM_REPLACEMENT("Случайное появление"),
+    EVERY_CELL("Зелье на каждой клетке")
+}
+
+data class BoardOptions(
+    val size: Int = BOARD_SIZE,
+    val potionPlacement: PotionPlacement = PotionPlacement.STANDARD,
+    val customCards: List<CustomCard> = emptyList()
+) {
+    init {
+        require(size == BOARD_SIZE || size == 7)
+        require(customCards.size <= CustomCard.MAX_CARDS)
+    }
+}
+
+data class CustomCard(val name: String, val effect: CardId, val flavor: String = "") {
+    init {
+        require(name.isNotBlank() && name.length <= MAX_NAME && !effect.isActive && flavor.length <= MAX_FLAVOR)
+    }
+
+    companion object {
+        const val MAX_CARDS = 12
+        const val MAX_NAME = 40
+        const val MAX_FLAVOR = 160
+    }
+}
+
+data class PotionCard(val effect: CardId, val custom: CustomCard? = null) {
+    val name: String get() = custom?.name ?: effect.displayName()
+}
 
 fun CardId.displayName() = display
 
@@ -171,28 +214,38 @@ fun MutableList<ActiveEffect>.get(id: CardId) = find { it.id == id }
 
 // ---------- Колода ----------
 
-class PotionDeck(val dlcEnabled: Boolean, private val random: Random = Random, choicePotions: Boolean = false, duel: Boolean = false) {
-    private val baseDraw = mutableListOf<CardId>()
-    private val baseDiscard = mutableListOf<CardId>()
-    private val dlcDraw = mutableListOf<CardId>()
-    private val dlcDiscard = mutableListOf<CardId>()
+class PotionDeck(
+    val dlcEnabled: Boolean, private val random: Random = Random, choicePotions: Boolean = false,
+    duel: Boolean = false, customCards: List<CustomCard> = emptyList()
+) {
+    private val baseDraw = mutableListOf<PotionCard>()
+    private val baseDiscard = mutableListOf<PotionCard>()
+    private val dlcDraw = mutableListOf<PotionCard>()
+    private val dlcDiscard = mutableListOf<PotionCard>()
+    private val basePool: List<PotionCard>
+    private val dlcPool: List<PotionCard>
 
     init {
         CARD_QUANTITIES.forEach { (card, qty) ->
             if (!duel || card !in duelExcludedCards) {
-                if (!card.isDlc) repeat(qty) { baseDraw.add(card) }
-                else if (dlcEnabled) repeat(qty) { dlcDraw.add(card) }
+                if (!card.isDlc) repeat(qty) { baseDraw.add(PotionCard(card)) }
+                else if (dlcEnabled) repeat(qty) { dlcDraw.add(PotionCard(card)) }
             }
         }
         if (choicePotions) repeat(2) {
-            baseDraw.add(CardId.CHOICE_SHIELD)
-            baseDraw.add(CardId.CHOICE_SPEED)
+            baseDraw.add(PotionCard(CardId.CHOICE_SHIELD))
+            baseDraw.add(PotionCard(CardId.CHOICE_SPEED))
         }
+        customCards.filter { !duel || it.effect !in duelExcludedCards }.forEach {
+            baseDraw.add(PotionCard(it.effect, it))
+        }
+        basePool = baseDraw.filter { it.custom == null }
+        dlcPool = dlcDraw.toList()
         baseDraw.shuffle(random)
         dlcDraw.shuffle(random)
     }
 
-    fun draw(source: DeckSource): CardId {
+    fun draw(source: DeckSource): PotionCard {
         val pile = if (source == DeckSource.BASE) baseDraw else dlcDraw
         val discard = if (source == DeckSource.BASE) baseDiscard else dlcDiscard
         if (pile.isEmpty()) {
@@ -200,11 +253,13 @@ class PotionDeck(val dlcEnabled: Boolean, private val random: Random = Random, c
             discard.clear()
             pile.shuffle(random)
         }
-        return pile.removeAt(pile.lastIndex)
+        if (pile.isNotEmpty()) return pile.removeAt(pile.lastIndex)
+        // The entire draw pile can be on the board when every tile has a potion.
+        return (if (source == DeckSource.BASE) basePool else dlcPool).random(random)
     }
 
-    fun discard(card: CardId) {
-        if (card.isDlc) dlcDiscard.add(card) else baseDiscard.add(card)
+    fun discard(card: PotionCard, source: DeckSource) {
+        if (source == DeckSource.DLC) dlcDiscard.add(card) else baseDiscard.add(card)
     }
 }
 
@@ -212,10 +267,11 @@ private val duelExcludedCards = setOf(CardId.BODY_SWAP, CardId.EFFECT_SWAP, Card
 
 data class CornerAssignment(val corner: Cell, val source: DeckSource)
 
-fun assignCornerDecks(dlcEnabled: Boolean, random: Random = Random): List<CornerAssignment> {
-    if (!dlcEnabled) return CORNERS.map { CornerAssignment(it, DeckSource.BASE) }
-    val diagonalA = listOf(Cell(0, 0), Cell(4, 4))
-    val diagonalB = listOf(Cell(0, 4), Cell(4, 0))
+fun assignCornerDecks(dlcEnabled: Boolean, random: Random = Random, boardSize: Int = BOARD_SIZE): List<CornerAssignment> {
+    val corners = boardCorners(boardSize)
+    if (!dlcEnabled) return corners.map { CornerAssignment(it, DeckSource.BASE) }
+    val diagonalA = corners.take(2)
+    val diagonalB = corners.drop(2)
     val (baseDiag, dlcDiag) = if (random.nextBoolean()) diagonalA to diagonalB else diagonalB to diagonalA
     return baseDiag.map { CornerAssignment(it, DeckSource.BASE) } + dlcDiag.map { CornerAssignment(it, DeckSource.DLC) }
 }
@@ -241,9 +297,13 @@ class BossUnit(val slot: Int, initialPosition: Cell) : BoardActor {
     override var stunnedTurns: Int by mutableStateOf(0)
 }
 
-class Potion(initialPosition: Cell, val source: DeckSource, initialCard: CardId) {
+class Potion(initialPosition: Cell, val source: DeckSource, initialCard: PotionCard) {
+    constructor(initialPosition: Cell, source: DeckSource, initialCard: CardId) :
+        this(initialPosition, source, PotionCard(initialCard))
+
     var position: Cell by mutableStateOf(initialPosition)
-    var cardId: CardId by mutableStateOf(initialCard)
+    var card by mutableStateOf(initialCard)
+    val cardId: CardId get() = card.effect
     var revealed: Boolean by mutableStateOf(false)
     var usedTrigger: Int by mutableStateOf(0)
 }

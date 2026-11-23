@@ -22,29 +22,44 @@ import java.util.Properties
 import javax.imageio.ImageIO
 
 internal const val defaultRelayEndpoint = ""
+internal const val supportsMovementKeys = true
 private val gameDirectory = File(
     System.getenv("LOCALAPPDATA") ?: System.getProperty("user.home"),
     "PotionsAndDungeons"
 )
 private val LocalBackActions = staticCompositionLocalOf<MutableList<() -> Unit>> { error("Missing window") }
+private val LocalMovementAction = staticCompositionLocalOf<MutableState<((Direction) -> Boolean)?>?> { null }
 
 fun main() = application {
     val session = remember { GameSession(FilePreferences("saved_match")) }
     val backActions = remember { mutableListOf<() -> Unit>() }
+    val movement = remember { mutableStateOf<((Direction) -> Boolean)?>(null) }
     DisposableEffect(session) { onDispose(session::closeLanRoom) }
     Window(
         onCloseRequest = ::exitApplication,
         title = "Potions and Dungeons",
         state = rememberWindowState(width = 900.dp, height = 820.dp),
         onPreviewKeyEvent = { event ->
-            val action = backActions.lastOrNull()
-            if (event.key == Key.Escape && event.type == KeyEventType.KeyUp && action != null) {
+            if (event.type != KeyEventType.KeyUp) return@Window false
+            if (event.key == Key.Escape) {
+                val action = backActions.lastOrNull() ?: return@Window false
                 action()
-                true
-            } else false
+                return@Window true
+            }
+            if (event.isAltPressed || event.isCtrlPressed || event.isMetaPressed) return@Window false
+            val direction = when (event.key) {
+                Key.W -> Direction.UP
+                Key.A -> Direction.LEFT
+                Key.S -> Direction.DOWN
+                Key.D -> Direction.RIGHT
+                else -> return@Window false
+            }
+            movement.value?.invoke(direction) == true
         }
     ) {
-        CompositionLocalProvider(LocalBackActions provides backActions) { GameApp(session) }
+        CompositionLocalProvider(LocalBackActions provides backActions, LocalMovementAction provides movement) {
+            GameApp(session)
+        }
     }
 }
 
@@ -93,6 +108,17 @@ internal fun BackHandler(enabled: Boolean = true, onBack: () -> Unit) {
 }
 
 @Composable
+internal fun MovementKeyHandler(onMove: (Direction) -> Boolean) {
+    val action = LocalMovementAction.current ?: return
+    val current by rememberUpdatedState(onMove)
+    DisposableEffect(action) {
+        val handler: (Direction) -> Boolean = { current(it) }
+        action.value = handler
+        onDispose { if (action.value === handler) action.value = null }
+    }
+}
+
+@Composable
 internal fun rememberNetworkAccess() = remember { NetworkAccess(false) { it() } }
 
 @Composable
@@ -109,6 +135,13 @@ internal fun rememberAvatarPicker(onPicked: (String) -> Unit): () -> Unit = {
 
 @Composable
 internal fun rememberAvatarPermission(): (String) -> Unit = { }
+
+internal fun lanAvatarBitmap(pixels: IntArray): ImageBitmap {
+    val side = LAN_AVATAR_SIZE
+    return BufferedImage(side, side, BufferedImage.TYPE_INT_ARGB).apply {
+        setRGB(0, 0, side, side, pixels, 0, side)
+    }.toComposeImageBitmap()
+}
 
 @Composable
 internal fun loadAvatar(uri: String, maxDimension: Int): State<ImageBitmap?> =

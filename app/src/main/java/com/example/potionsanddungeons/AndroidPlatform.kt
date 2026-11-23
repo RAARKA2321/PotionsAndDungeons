@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
@@ -19,6 +20,7 @@ import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 internal val defaultRelayEndpoint = BuildConfig.RELAY_ENDPOINT
+internal const val supportsMovementKeys = false
 private const val LOCAL_NETWORK = "android.permission.ACCESS_LOCAL_NETWORK"
 
 internal fun androidPreferences(context: Context, name: String): GamePreferences {
@@ -68,6 +70,9 @@ internal fun BackHandler(enabled: Boolean = true, onBack: () -> Unit) {
 }
 
 @Composable
+internal fun MovementKeyHandler(onMove: (Direction) -> Boolean) = Unit
+
+@Composable
 internal fun rememberNetworkAccess(): NetworkAccess {
     val context = LocalContext.current
     var permissionMessage by remember { mutableStateOf(false) }
@@ -100,6 +105,9 @@ internal fun rememberAvatarPermission(): (String) -> Unit {
     val resolver = LocalContext.current.contentResolver
     return { resolver.takePersistableUriPermission(Uri.parse(it), Intent.FLAG_GRANT_READ_URI_PERMISSION) }
 }
+
+internal fun lanAvatarBitmap(pixels: IntArray): ImageBitmap =
+    Bitmap.createBitmap(pixels, LAN_AVATAR_SIZE, LAN_AVATAR_SIZE, Bitmap.Config.ARGB_8888).asImageBitmap()
 
 @Composable
 internal fun loadAvatar(uri: String, maxDimension: Int): State<ImageBitmap?> {

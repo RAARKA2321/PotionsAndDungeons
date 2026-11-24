@@ -6,6 +6,229 @@ import org.junit.Test
 
 class GameEngineTest {
     @Test
+    fun recapRecordsPickupsPlayedCardsAndWhereTheBossAttackStarted() {
+        val engine = GameEngine(true, Random(1))
+        engine.setupCardSandbox()
+        val (survivor, victim) = engine.players
+        val boss = engine.bosses.single()
+        engine.currentTurnIndex = 1
+        survivor.effects.add(ActiveEffect(CardId.INVISIBILITY, EffectCategory.PERMANENT))
+        boss.position = Cell(1, 1)
+        victim.position = Cell(0, 2)
+        engine.potions = listOf(Potion(victim.position, DeckSource.BASE, CardId.SPEED))
+        engine.checkPotionAt(victim)
+        engine.continueAfterPotion()
+
+        victim.activeCards.add(CardId.ATTACK)
+        assertTrue(engine.playActiveCard(victim, CardId.ATTACK))
+        engine.handleCellClick(Cell(0, 3))
+        engine.pendingSteps = 1
+        engine.handleCellClick(Cell(0, 1))
+        engine.triggerBossMove()
+
+        assertTrue(engine.gameOver)
+        assertEquals(mapOf("Скорость" to 1), engine.recapFor(victim).potions)
+        assertEquals(mapOf(CardId.ATTACK to 1), engine.recapFor(victim).playedCards)
+        val elimination = engine.eliminations.single()
+        assertSame(victim, elimination.player)
+        assertEquals("Скорость", elimination.lastPotion)
+        assertEquals(Cell(0, 1), elimination.lastTurnCell)
+        assertEquals(Cell(0, 1), elimination.cell)
+        assertEquals(EliminationCause.Boss("Босс", Cell(1, 1), Cell(0, 1), 0), elimination.cause)
+    }
+
+    @Test
+    fun bossUpgradesApplyOnlyAfterRoundsEightAndTwelveAndAddToPotionBonuses() {
+        val engine = GameEngine(false, Random(2), customRules = CustomRules(
+            board = BoardOptions(size = 7, bossUpgrades = true)
+        ))
+        engine.setupGame(listOf("А", "Б"))
+        val (target, other) = engine.players
+        val boss = engine.bosses.single()
+        fun hide(player: Player) {
+            player.effects.add(ActiveEffect(CardId.INVISIBILITY, EffectCategory.PERMANENT))
+        }
+        fun completeRound() {
+            engine.awaitingBossMove = true
+            engine.triggerBossMove()
+        }
+        hide(target)
+        hide(other)
+        repeat(7) { completeRound() }
+        assertEquals(0, engine.bossSpeedBonus)
+        assertEquals(BossUpgrade.SPEED, engine.nextBossUpgrade)
+        completeRound()
+        assertEquals(8, engine.completedBossRounds)
+        assertEquals(1, engine.bossSpeedBonus)
+
+        target.effects.clear()
+        target.position = Cell(3, 0)
+        engine.awaitingBossMove = true
+        assertTrue(engine.advanceBossStep())
+        assertEquals(Cell(3, 2), boss.position)
+        assertTrue(engine.advanceBossStep())
+        assertEquals(Cell(3, 1), boss.position)
+        assertEquals(8, engine.completedBossRounds)
+        assertFalse(engine.advanceBossStep())
+        assertEquals(9, engine.completedBossRounds)
+
+        hide(target)
+        boss.position = Cell(3, 3)
+        repeat(2) { completeRound() }
+        engine.increaseBossAttackRadius()
+        assertEquals(1, engine.bossAttackRadiusBonus)
+        assertEquals(BossUpgrade.ATTACK, engine.nextBossUpgrade)
+        completeRound()
+        assertEquals(12, engine.completedBossRounds)
+        assertEquals(2, engine.bossAttackRadiusBonus)
+        assertTrue(Cell(3, 5) in engine.bossAttackZoneCells())
+        assertNull(engine.nextBossUpgrade)
+        completeRound()
+        assertEquals(2, engine.bossAttackRadiusBonus)
+    }
+
+    @Test
+    fun curatedDeckKeepsExactCopiesEvenWhenTheBoardOrCrateCouldHoldMore() {
+        val custom = CustomCard("Двойная скорость", listOf(CardId.SPEED, CardId.SPEED))
+        val overrides = stockDeckCards(false, false, false).mapValues { (card, _) ->
+            if (card == CardId.SHIELD) 1 else 0
+        }
+        val recipe = DeckRecipe(overrides, mapOf(custom.name to 2))
+        val board = BoardOptions(customCards = listOf(custom), deckRecipe = recipe)
+        val engine = GameEngine(false, Random(1), customRules = CustomRules(board = board))
+        engine.setupGame(listOf("А", "Б"))
+        assertEquals(3, engine.potions.size)
+        assertEquals(1, engine.potions.count { it.cardId == CardId.SHIELD })
+        assertEquals(2, engine.potions.count { it.card.custom == custom })
+        engine.spawnPotionsAround(CENTER)
+        assertEquals(3, engine.potions.size)
+        val potion = engine.potions.first()
+        engine.resolvePotionCard(engine.turnOrder.first(), potion)
+        assertEquals(3, engine.potions.size)
+        assertEquals(2, engine.potions.count { it.card.custom == custom })
+    }
+
+    @Test
+    fun everyCellUsesTheOtherPileWhenACuratedDlcDeckRunsOutDuringSetup() {
+        val overrides = stockDeckCards(true, false, false).mapValues { (card, _) ->
+            when (card) {
+                CardId.SHIELD -> 20
+                CardId.SPEED -> 4
+                CardId.TELEPORT -> 1
+                else -> 0
+            }
+        }
+        val board = BoardOptions(potionPlacement = PotionPlacement.EVERY_CELL, deckRecipe = DeckRecipe(overrides))
+        assertNull(board.deckProblem(dlc = true))
+        val engine = GameEngine(true, Random(1), customRules = CustomRules(board = board))
+        engine.setupGame(listOf("А", "Б"))
+        assertEquals(25, engine.potions.map { it.position }.distinct().size)
+        assertEquals(1, engine.potions.count { it.source == DeckSource.DLC })
+        val tooFew = board.copy(size = 7)
+        assertNotNull(tooFew.deckProblem(dlc = true))
+    }
+
+    @Test
+    fun customPotionWaitsForTargetDiceAndRewardBeforeApplyingLaterEffects() {
+        val engine = GameEngine(true, Random(1), animateD4 = true)
+        engine.setupCardSandbox()
+        val player = engine.turnOrder.first()
+        engine.potions = emptyList()
+        val effects = listOf(CardId.SPEED, CardId.TELEPORT, CardId.ATTRACTION, CardId.CHOICE_SHIELD, CardId.SLOWDOWN)
+        val potion = CustomCard("Цепочка", effects)
+        engine.testCard(potion.effect, potion)
+        assertEquals(true, engine.cardReveal?.showsAllEffects)
+        assertTrue(player.effects.isEmpty())
+
+        engine.continueAfterPotion()
+        assertTrue(player.effects.has(CardId.SPEED))
+        assertTrue(engine.pendingChoice is PendingChoice.ChooseCell)
+        assertTrue(engine.d4Rolls.isEmpty())
+        engine.handleCellClick(Cell(0, 0))
+        assertTrue(engine.d4Rolls.isNotEmpty())
+        assertNull(engine.cardReveal)
+        assertFalse(player.effects.has(CardId.SLOWDOWN))
+        while (engine.d4Rolls.isNotEmpty()) engine.finishD4Animation()
+
+        assertEquals(3, engine.cardReveal?.effectIndex)
+        assertEquals(CardId.SHIELD, engine.cardReveal?.choiceReward)
+        assertFalse(player.effects.has(CardId.SLOWDOWN))
+        engine.continueAfterPotion()
+        assertTrue(player.effects.has(CardId.SHIELD))
+        assertTrue(player.effects.has(CardId.SLOWDOWN))
+        assertFalse(engine.hasPendingAction)
+    }
+
+    @Test
+    fun nestedCustomPotionCompletesBeforeManualControlResumes() {
+        val engine = GameEngine(true, Random(1), animateD4 = true)
+        engine.setupCardSandbox()
+        val (controller, controlled) = engine.players
+        val first = CustomCard("Нити", listOf(CardId.PUPPETEER, CardId.SHIELD))
+        val nested = CustomCard("Двойная скорость", listOf(CardId.SPEED, CardId.SPEED))
+        engine.potions = listOf(Potion(Cell(0, 1), DeckSource.BASE, PotionCard(nested.effect, nested)))
+        engine.testCard(first.effect, first)
+        engine.continueAfterPotion()
+        assertTrue(engine.resolvePlayerChoice(controlled))
+        while (engine.d4Rolls.isNotEmpty()) engine.finishD4Animation()
+        engine.pendingPuppetSteps = 2
+
+        engine.handleCellClick(Cell(0, 1))
+        assertEquals(nested, engine.cardReveal?.customCard)
+        engine.continueAfterPotion()
+        assertEquals(2, engine.movementEffectCount(controlled, CardId.SPEED))
+        assertFalse(controller.effects.has(CardId.SHIELD))
+        assertEquals(1, engine.pendingPuppetSteps)
+        engine.handleCellClick(Cell(0, 0))
+        assertTrue(controller.effects.has(CardId.SHIELD))
+        assertFalse(engine.hasPendingAction)
+    }
+
+    @Test
+    fun stepPreviewDistinguishesWalkingPastPotionsFromLandingAndSlipping() {
+        val engine = GameEngine(false, Random(1))
+        engine.setupCardSandbox()
+        val player = engine.turnOrder.first()
+        player.position = Cell(0, 0)
+        val next = Cell(0, 1)
+        engine.potions = listOf(Potion(next, DeckSource.BASE, CardId.SPEED))
+        engine.pendingSteps = 2
+        assertEquals(false, engine.previewStep(next)?.endsMovement)
+        assertEquals(false, engine.previewStep(next)?.picksPotion)
+        engine.pendingSteps = 1
+        assertEquals(true, engine.previewStep(next)?.endsMovement)
+        assertEquals(true, engine.previewStep(next)?.picksPotion)
+        engine.bananaPeels.add(next)
+        assertEquals(true, engine.previewStep(next)?.slips)
+        assertEquals(false, engine.previewStep(next)?.picksPotion)
+        assertNull(engine.previewStep(Cell(0, 2)))
+        assertEquals(Cell(0, 0), player.position)
+    }
+
+    @Test
+    fun customBoardRoutesAroundMissingCellsAndFillsOnlyItsOwnTiles() {
+        val tiles = setOf(Cell(1, 1), Cell(2, 1), Cell(3, 1), Cell(3, 2), Cell(3, 3), Cell(2, 3), Cell(1, 3))
+        val layout = BoardLayout("Подкова", 5, tiles,
+            listOf(Cell(1, 3), Cell(3, 3), Cell(2, 3), Cell(3, 2)), bossStart = Cell(1, 1))
+        val engine = GameEngine(false, Random(1), customRules = CustomRules(
+            board = BoardOptions(5, PotionPlacement.EVERY_CELL, layout = layout)
+        ))
+        engine.setupGame(listOf("А", "Б"))
+        val gap = Cell(1, 2)
+        assertEquals(tiles, engine.potions.map { it.position }.toSet())
+        assertEquals(layout.starts.take(2), engine.players.map { it.position })
+        assertFalse(engine.isBoardTarget(gap))
+        assertEquals(layout.bossStart, engine.traceUntilObstacle(layout.bossStart, Direction.RIGHT).second)
+
+        engine.bossAttackRadiusBonus = 2
+        assertFalse(layout.starts.first() in engine.bossAttackZoneCells())
+        engine.awaitingBossMove = true
+        engine.advanceBossStep()
+        assertEquals(Cell(2, 1), engine.bosses.single().position)
+        assertTrue(engine.players.all { it.alive })
+    }
+
+    @Test
     fun largeBoardSupportsMovementAndEffectsBeyondTheOriginalEdge() {
         val engine = GameEngine(true, Random(1), customRules = CustomRules(
             breakableDoors = true, board = BoardOptions(size = 7)

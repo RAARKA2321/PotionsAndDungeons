@@ -9,12 +9,15 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.awt.FileDialog
+import java.awt.Desktop
 import java.awt.Frame
 import java.awt.RenderingHints
 import java.awt.image.BufferedImage
 import java.io.File
+import java.net.URI
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -29,11 +32,13 @@ private val gameDirectory = File(
 )
 private val LocalBackActions = staticCompositionLocalOf<MutableList<() -> Unit>> { error("Missing window") }
 private val LocalMovementAction = staticCompositionLocalOf<MutableState<((Direction) -> Boolean)?>?> { null }
+private val LocalUpdateExit = staticCompositionLocalOf<(() -> Unit)?> { null }
 
 fun main() = application {
     val session = remember { GameSession(FilePreferences("saved_match")) }
     val backActions = remember { mutableListOf<() -> Unit>() }
     val movement = remember { mutableStateOf<((Direction) -> Boolean)?>(null) }
+    val exit = remember { { exitApplication() } }
     DisposableEffect(session) { onDispose(session::closeLanRoom) }
     Window(
         onCloseRequest = ::exitApplication,
@@ -57,7 +62,8 @@ fun main() = application {
             movement.value?.invoke(direction) == true
         }
     ) {
-        CompositionLocalProvider(LocalBackActions provides backActions, LocalMovementAction provides movement) {
+        CompositionLocalProvider(LocalBackActions provides backActions, LocalMovementAction provides movement,
+            LocalUpdateExit provides exit) {
             GameApp(session)
         }
     }
@@ -97,6 +103,28 @@ internal fun rememberGamePreferences(name: String): GamePreferences = remember(n
 internal fun appVersion() = remember { System.getProperty("potions.version", "dev") }
 
 @Composable
+internal fun rememberUpdatePlatform(): UpdatePlatform {
+    val exit = LocalUpdateExit.current
+    return remember(exit) {
+        val root = System.getProperty("potions.launcher.dir")?.let(::File)
+        UpdatePlatform(
+            target = UpdateTarget.WINDOWS, cache = File(gameDirectory, "updates"),
+            canInstall = root != null && exit != null,
+            prepare = { update, archive ->
+                stageWindowsUpdate(checkNotNull(root), update, archive).also { archive.delete() }
+            },
+            install = { versionFolder ->
+                val updates = checkNotNull(root).toPath().resolve(".updates")
+                check(versionFolder.toPath().parent == updates)
+                Files.writeString(updates.resolve("restart"), versionFolder.name)
+                checkNotNull(exit).invoke()
+            },
+            openReleases = { Desktop.getDesktop().browse(URI(GAME_RELEASES_URL)) }
+        )
+    }
+}
+
+@Composable
 internal fun BackHandler(enabled: Boolean = true, onBack: () -> Unit) {
     val actions = LocalBackActions.current
     val current by rememberUpdatedState(onBack)
@@ -123,14 +151,46 @@ internal fun rememberNetworkAccess() = remember { NetworkAccess(false) { it() } 
 
 @Composable
 internal fun rememberAvatarPicker(onPicked: (String) -> Unit): () -> Unit = {
+    chooseFile("Выбрать фото", FileDialog.LOAD)?.let { onPicked(it.absolutePath) }
+}
+
+private fun chooseFile(title: String, mode: Int, suggestedName: String? = null): File? {
     val owner = Frame.getFrames().firstOrNull { it.isActive }
-    val dialog = FileDialog(owner, "Выбрать фото", FileDialog.LOAD)
-    try {
+    val dialog = FileDialog(owner, title, mode)
+    return try {
+        dialog.file = suggestedName
         dialog.isVisible = true
-        dialog.file?.let { onPicked(File(dialog.directory, it).absolutePath) }
+        dialog.file?.let { File(dialog.directory, it) }
     } finally {
         dialog.dispose()
     }
+}
+
+@Composable
+internal fun rememberBoardFiles(
+    onImport: (Result<BoardLayout>?) -> Unit, onExport: (Result<Unit>?) -> Unit
+): BoardFileActions {
+    val scope = rememberCoroutineScope()
+    val importResult by rememberUpdatedState(onImport)
+    val exportResult by rememberUpdatedState(onExport)
+    return BoardFileActions(
+        pick = {
+            val file = chooseFile("Импортировать поле", FileDialog.LOAD)
+            if (file == null) importResult(null)
+            else scope.launch {
+                importResult(withContext(Dispatchers.IO) {
+                    runCatching { file.inputStream().buffered().use { it.readBoardFile() } }
+                })
+            }
+        },
+        save = { layout ->
+            val file = chooseFile("Экспортировать поле", FileDialog.SAVE, layout.fileName())
+            if (file == null) exportResult(null)
+            else scope.launch {
+                exportResult(withContext(Dispatchers.IO) { runCatching { file.writeText(layout.encodeFile()) } })
+            }
+        }
+    )
 }
 
 @Composable

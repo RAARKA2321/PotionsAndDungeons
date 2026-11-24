@@ -154,23 +154,39 @@ enum class PotionPlacement(val label: String) {
 data class BoardOptions(
     val size: Int = BOARD_SIZE,
     val potionPlacement: PotionPlacement = PotionPlacement.STANDARD,
-    val customCards: List<CustomCard> = emptyList()
+    val customCards: List<CustomCard> = emptyList(),
+    val layout: BoardLayout? = null,
+    val deckRecipe: DeckRecipe? = null,
+    val bossUpgrades: Boolean = false
 ) {
     init {
         require(size == BOARD_SIZE || size == 7)
         require(customCards.size <= CustomCard.MAX_CARDS)
+        require(layout == null || layout.size == size)
     }
 }
 
-data class CustomCard(val name: String, val effect: CardId, val flavor: String = "") {
+internal enum class BossUpgrade(val completedRounds: Int, val label: String) {
+    SPEED(8, "Скорость"),
+    ATTACK(12, "Усиленная атака")
+}
+
+
+data class CustomCard(val name: String, val effects: List<CardId>, val flavor: String = "") {
+    constructor(name: String, effect: CardId, flavor: String = "") : this(name, listOf(effect), flavor)
+
+    val effect: CardId get() = effects.first()
+
     init {
-        require(name.isNotBlank() && name.length <= MAX_NAME && !effect.isActive && flavor.length <= MAX_FLAVOR)
+        require(name.isNotBlank() && name.length <= MAX_NAME && flavor.length <= MAX_FLAVOR)
+        require(effects.size in 1..MAX_EFFECTS && effects.none { it.isActive })
     }
 
     companion object {
         const val MAX_CARDS = 12
         const val MAX_NAME = 40
         const val MAX_FLAVOR = 160
+        const val MAX_EFFECTS = 5
     }
 }
 
@@ -216,7 +232,7 @@ fun MutableList<ActiveEffect>.get(id: CardId) = find { it.id == id }
 
 class PotionDeck(
     val dlcEnabled: Boolean, private val random: Random = Random, choicePotions: Boolean = false,
-    duel: Boolean = false, customCards: List<CustomCard> = emptyList()
+    duel: Boolean = false, customCards: List<CustomCard> = emptyList(), private val recipe: DeckRecipe? = null
 ) {
     private val baseDraw = mutableListOf<PotionCard>()
     private val baseDiscard = mutableListOf<PotionCard>()
@@ -226,18 +242,20 @@ class PotionDeck(
     private val dlcPool: List<PotionCard>
 
     init {
-        CARD_QUANTITIES.forEach { (card, qty) ->
-            if (!duel || card !in duelExcludedCards) {
-                if (!card.isDlc) repeat(qty) { baseDraw.add(PotionCard(card)) }
-                else if (dlcEnabled) repeat(qty) { dlcDraw.add(PotionCard(card)) }
+        val contents = deckContents(dlcEnabled, choicePotions, duel, customCards, recipe)
+        contents.stock.forEach { (card, count) ->
+            if (card.choiceReward == null) {
+                val pile = if (card.isDlc) dlcDraw else baseDraw
+                repeat(count) { pile.add(PotionCard(card)) }
             }
         }
-        if (choicePotions) repeat(2) {
-            baseDraw.add(PotionCard(CardId.CHOICE_SHIELD))
-            baseDraw.add(PotionCard(CardId.CHOICE_SPEED))
+        repeat(choiceDeckCards.maxOf { contents.stock[it] ?: 0 }) { index ->
+            choiceDeckCards.forEach { card ->
+                if (index < (contents.stock[card] ?: 0)) baseDraw.add(PotionCard(card))
+            }
         }
-        customCards.filter { !duel || it.effect !in duelExcludedCards }.forEach {
-            baseDraw.add(PotionCard(it.effect, it))
+        contents.custom.forEach { (card, count) ->
+            repeat(count) { baseDraw.add(PotionCard(card.effect, card)) }
         }
         basePool = baseDraw.filter { it.custom == null }
         dlcPool = dlcDraw.toList()
@@ -245,7 +263,9 @@ class PotionDeck(
         dlcDraw.shuffle(random)
     }
 
-    fun draw(source: DeckSource): PotionCard {
+    fun draw(source: DeckSource): PotionCard = checkNotNull(drawAvailable(source))
+
+    fun drawAvailable(source: DeckSource): PotionCard? {
         val pile = if (source == DeckSource.BASE) baseDraw else dlcDraw
         val discard = if (source == DeckSource.BASE) baseDiscard else dlcDiscard
         if (pile.isEmpty()) {
@@ -254,6 +274,7 @@ class PotionDeck(
             pile.shuffle(random)
         }
         if (pile.isNotEmpty()) return pile.removeAt(pile.lastIndex)
+        if (recipe != null) return null
         // The entire draw pile can be on the board when every tile has a potion.
         return (if (source == DeckSource.BASE) basePool else dlcPool).random(random)
     }
@@ -262,8 +283,6 @@ class PotionDeck(
         if (source == DeckSource.DLC) dlcDiscard.add(card) else baseDiscard.add(card)
     }
 }
-
-private val duelExcludedCards = setOf(CardId.BODY_SWAP, CardId.EFFECT_SWAP, CardId.BFF, CardId.PUPPETEER, CardId.THIEF, CardId.WEREWOLF)
 
 data class CornerAssignment(val corner: Cell, val source: DeckSource)
 

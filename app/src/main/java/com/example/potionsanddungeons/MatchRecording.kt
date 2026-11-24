@@ -23,7 +23,7 @@ internal class MatchRecording(
     val bots: Set<Int>,
     val dlc: Boolean,
     private val seed: Int = Random.nextInt(),
-    private val version: Int = 9,
+    private val version: Int = 13,
     private val legacyStyle: BotStyle? = null,
     val customRules: CustomRules = CustomRules(),
     val dailyDate: String? = null
@@ -65,7 +65,7 @@ internal class MatchRecording(
 
         fun restore(json: JSONObject): MatchRecording {
             val version = json.getInt("version")
-            require(version in 1..9)
+            require(version in 1..13)
             val names = json.getJSONArray("names")
             val bots = json.getJSONArray("bots")
             val date = json.optString("dailyDate").ifEmpty { null }

@@ -24,7 +24,7 @@ object ActiveCardResolver {
         val candidates = if (player.isBot && player.botStyle.considersCardTargets) {
             engine.occupiedAttackTargets(player)
         } else {
-            player.position.neighbors4(engine.boardSize)
+            player.position.neighbors4(engine.boardSize).filter(engine::isBoardCell)
         }
         engine.requestChooseCell(
             prompt = "Выбери соседнюю клетку для атаки",
@@ -75,7 +75,7 @@ object ActiveCardResolver {
         engine.withD4 { roll ->
         val direction = Wall.directionByNumber(roll)
         val cell = Cell(player.position.row + direction.dr, player.position.col + direction.dc)
-        if (cell.inBounds(engine.boardSize)) {
+        if (engine.isBoardCell(cell)) {
             if (cell !in engine.bananaPeels) engine.bananaPeels.add(cell)
             engine.addLog("${player.name} положил кожурку от банана на (${cell.row},${cell.col})")
         } else {
@@ -102,11 +102,11 @@ object ActiveCardResolver {
             allowed = { canStealFrom(player, it) }
         ) { target ->
             if (target.effects.size == 1) {
-                player.activeCards.remove(CardId.THIEF)
+                engine.consumeActiveCard(player, CardId.THIEF)
                 engine.stealEffect(player, target, target.effects.first())
             } else {
                 engine.requestChooseEffect(target) { effect ->
-                    player.activeCards.remove(CardId.THIEF)
+                    engine.consumeActiveCard(player, CardId.THIEF)
                     engine.stealEffect(player, target, effect)
                 }
             }

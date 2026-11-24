@@ -30,7 +30,7 @@ import java.util.Locale
 import java.util.UUID
 
 private const val PORT = 48473
-private const val PROTOCOL = 2
+private const val PROTOCOL = 6
 private const val MAX_FRAME = 2 * 1024 * 1024
 
 internal fun readLanFrame(input: DataInputStream): String {
@@ -483,20 +483,20 @@ internal class LanRoom(private val resolveIpv4: (String) -> InetAddress? = ::par
         driveHost()
     }
 
-    fun configureDlc(enabled: Boolean) {
-        if (!hosting || !connected || match != null || dlcEnabled == enabled) return
-        dlcEnabled = enabled
-        broadcastRoom()
-    }
+    fun configureDlc(enabled: Boolean) = configureOptions(enabled, boardOptions)
 
-    fun configureBoard(options: BoardOptions) {
-        if (!hosting || !connected || match != null || boardOptions == options) return
+    fun configureBoard(options: BoardOptions) = configureOptions(dlcEnabled, options)
+
+    fun configureOptions(dlc: Boolean, options: BoardOptions) {
+        if (!hosting || !connected || match != null || (dlcEnabled == dlc && boardOptions == options)) return
+        dlcEnabled = dlc
         boardOptions = options
         broadcastRoom()
     }
 
     fun start() {
         if (!hosting || !connected || match != null || paused || seats.size !in 2..4) return
+        if (boardOptions.deckProblem(dlcEnabled) != null) return
         startMatch()
     }
 

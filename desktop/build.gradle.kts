@@ -6,7 +6,7 @@ plugins {
 }
 
 val desktopTarget = providers.gradleProperty("desktopTarget").orNull
-version = "1.6.0"
+version = "1.7.0"
 
 sourceSets.main { resources.srcDir("../app/src/main/resources") }
 

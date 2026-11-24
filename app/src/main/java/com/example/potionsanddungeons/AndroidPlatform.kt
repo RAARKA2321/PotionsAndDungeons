@@ -9,13 +9,19 @@ import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.FileProvider
+import androidx.core.content.pm.PackageInfoCompat
+import java.io.File
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
@@ -65,6 +71,40 @@ internal fun appVersion(): String {
 }
 
 @Composable
+internal fun rememberUpdatePlatform(): UpdatePlatform {
+    val context = LocalContext.current
+    return remember(context) {
+        UpdatePlatform(UpdateTarget.ANDROID, File(context.cacheDir, "updates"), true,
+            prepare = { update, file -> verifyAndroidUpdate(context, update, file) },
+            install = { file ->
+                if (Build.VERSION.SDK_INT >= 26 && !context.packageManager.canRequestPackageInstalls()) {
+                    context.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:${context.packageName}")))
+                } else {
+                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.updates", file)
+                    context.startActivity(Intent(Intent.ACTION_VIEW)
+                        .setDataAndType(uri, "application/vnd.android.package-archive")
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+                }
+            },
+            openReleases = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(GAME_RELEASES_URL))) }
+        )
+    }
+}
+
+@Suppress("DEPRECATION")
+private fun verifyAndroidUpdate(context: Context, update: GameUpdate, file: File): File {
+    val manager = context.packageManager
+    val current = manager.getPackageInfo(context.packageName, PackageManager.GET_SIGNATURES)
+    val candidate = checkNotNull(manager.getPackageArchiveInfo(file.absolutePath, PackageManager.GET_SIGNATURES))
+    val signers = candidate.signatures?.toSet().orEmpty()
+    require(candidate.packageName == context.packageName && candidate.versionName == update.version)
+    require(PackageInfoCompat.getLongVersionCode(candidate) > PackageInfoCompat.getLongVersionCode(current))
+    require(signers.isNotEmpty() && signers == current.signatures?.toSet())
+    return file
+}
+
+@Composable
 internal fun BackHandler(enabled: Boolean = true, onBack: () -> Unit) {
     androidx.activity.compose.BackHandler(enabled, onBack)
 }
@@ -98,6 +138,47 @@ internal fun rememberAvatarPicker(onPicked: (String) -> Unit): () -> Unit {
         if (uri != null) onPicked(uri.toString())
     }
     return { picker.launch(arrayOf("image/*")) }
+}
+
+@Composable
+internal fun rememberBoardFiles(
+    onImport: (Result<BoardLayout>?) -> Unit, onExport: (Result<Unit>?) -> Unit
+): BoardFileActions {
+    val resolver = LocalContext.current.contentResolver
+    val scope = rememberCoroutineScope()
+    val importResult by rememberUpdatedState(onImport)
+    val exportResult by rememberUpdatedState(onExport)
+    var pendingExport by rememberSaveable { mutableStateOf<String?>(null) }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) importResult(null)
+        else scope.launch {
+            importResult(withContext(Dispatchers.IO) {
+                runCatching { checkNotNull(resolver.openInputStream(uri)).use { it.readBoardFile() } }
+            })
+        }
+    }
+    val saver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        val content = pendingExport
+        pendingExport = null
+        if (uri == null) exportResult(null)
+        else scope.launch {
+            exportResult(withContext(Dispatchers.IO) {
+                runCatching {
+                    val encoded = checkNotNull(content)
+                    checkNotNull(resolver.openOutputStream(uri, "wt")).bufferedWriter(Charsets.UTF_8).use {
+                        it.write(encoded)
+                    }
+                }
+            })
+        }
+    }
+    return BoardFileActions(
+        pick = { picker.launch(arrayOf("*/*")) },
+        save = { layout ->
+            pendingExport = layout.encodeFile()
+            saver.launch(layout.fileName())
+        }
+    )
 }
 
 @Composable

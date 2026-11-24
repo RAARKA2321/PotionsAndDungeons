@@ -35,7 +35,11 @@ class LanAvatarTest {
             val hostAvatar = LanAvatar.fromPixels(IntArray(LAN_AVATAR_SIZE * LAN_AVATAR_SIZE) { 0xff992244.toInt() })
             val guestAvatar = LanAvatar.fromPixels(IntArray(LAN_AVATAR_SIZE * LAN_AVATAR_SIZE) { 0xff228833.toInt() })
             val expected = mapOf(0 to hostAvatar, 1 to guestAvatar)
-            val board = BoardOptions(7, PotionPlacement.EVERY_CELL, listOf(CustomCard("Флакон ветра", CardId.SPEED)))
+            val tiles = List(49) { Cell(it / 7, it % 7) }.toSet() - Cell(3, 2)
+            val layout = BoardLayout("Проход", 7, tiles, boardCorners(7), boardCenter(7))
+            val special = CustomCard("Флакон ветра", listOf(CardId.SPEED, CardId.SHIELD))
+            val recipe = DeckRecipe(mapOf(CardId.SLOWDOWN to 0, CardId.SHIELD to 6), mapOf(special.name to 2))
+            val board = BoardOptions(7, PotionPlacement.EVERY_CELL, listOf(special), layout, recipe, bossUpgrades = true)
             try {
                 host.host("Ведущий", vpnAddress = "127.0.0.1", avatar = hostAvatar)
                 awaitState { !host.busy }
@@ -49,15 +53,18 @@ class LanAvatarTest {
                 assertFalse(guest.dlcEnabled)
                 guest.configureDlc(true)
                 assertFalse(guest.dlcEnabled)
-                host.configureDlc(true)
-                host.configureBoard(board)
+                val preset = PartyPreset("Сетевая партия", true, CustomRules(board = board))
+                val saved = readPartyPresets(encodePartyPresets(listOf(preset))).single()
+                host.configureOptions(saved.dlc, saved.rules.board)
                 awaitState { guest.dlcEnabled && guest.boardOptions == board }
                 host.start()
                 awaitState { guest.engine != null }
                 val first = checkNotNull(guest.engine)
                 assertEquals(guest.names, first.players.map { it.name })
                 assertEquals(7, first.boardSize)
-                assertEquals(49, first.potions.size)
+                assertTrue(first.bossUpgradesEnabled)
+                assertEquals(tiles, first.potions.map { it.position }.toSet())
+                assertTrue(first.potions.none { it.cardId == CardId.SLOWDOWN })
                 assertEquals(checkNotNull(host.engine).potions.map { it.card }, first.potions.map { it.card })
                 assertTrue(first.potions.any { it.source == DeckSource.DLC })
                 host.configureDlc(false)
@@ -66,7 +73,7 @@ class LanAvatarTest {
                 host.rematch()
                 awaitState { guest.engine !== first }
                 assertEquals(board, guest.boardOptions)
-                assertEquals(49, checkNotNull(guest.engine).potions.size)
+                assertEquals(tiles, checkNotNull(guest.engine).potions.map { it.position }.toSet())
                 assertTrue(checkNotNull(guest.engine).potions.any { it.source == DeckSource.DLC })
                 assertEquals(expected, guest.avatars)
                 assertEquals(expected, host.avatars)

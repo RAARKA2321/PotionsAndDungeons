@@ -50,8 +50,7 @@ internal fun DiceColorSettings(colors: DiceColors, onChange: (DiceColors) -> Uni
         "Синий" to Color(0xFF709EE8), "Зелёный" to Color(0xFF70C8A5),
         "Золотой" to Color(0xFFECC878), "Фиолетовый" to Color(0xFFB28AE0)
     )
-    for (sides in listOf(4,6)) {
-        Text("Цвет д$sides", style = MaterialTheme.typography.titleMedium)
+    for (sides in listOf(4,6)) MenuPanel("Цвет д$sides") {
         BoxWithConstraints(Modifier.fillMaxWidth()) {
         val columns = if (maxWidth < 480.dp) 1 else 2
         Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(12.dp)) {

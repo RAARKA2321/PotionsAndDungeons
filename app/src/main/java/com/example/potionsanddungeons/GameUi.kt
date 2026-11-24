@@ -4,17 +4,21 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,15 +26,18 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -121,6 +128,8 @@ val CARD_DESCRIPTIONS: Map<CardId, String> = mapOf(
 
 @Composable
 internal fun GameApp(session: GameSession, windowInsets: Modifier = Modifier) {
+    val updates = rememberUpdateController()
+    LaunchedEffect(updates) { updates.check() }
     MaterialTheme(
         colorScheme = darkColorScheme(
             primary = AppColors.accent,
@@ -136,7 +145,7 @@ internal fun GameApp(session: GameSession, windowInsets: Modifier = Modifier) {
     ) {
         Surface(modifier = Modifier.fillMaxSize(), color = AppColors.screenBg) {
             Box(modifier = Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(AppColors.screenBg, Color(0xFF19333D), AppColors.screenBg)) ).then(windowInsets)) {
-                RootScreen(session)
+                CompositionLocalProvider(LocalUpdates provides updates) { RootScreen(session) }
             }
         }
     }
@@ -224,6 +233,27 @@ private fun RootScreen(session: GameSession) = with(session) {
     val preferences = rememberGamePreferences("avatars")
     var avatars by remember { mutableStateOf(preferences.values()) }
     var showAvatars by rememberSaveable { mutableStateOf(false) }
+    val layoutPreferences = rememberGamePreferences("board_layouts")
+    var layouts by remember(layoutPreferences) {
+        val saved = layoutPreferences.values()["layouts"]
+        val restored = saved?.let {
+            runCatching {
+                val array = org.json.JSONArray(it)
+                List(minOf(array.length(), BoardLayout.MAX_LAYOUTS)) { index -> readBoardLayout(array.getJSONObject(index)) }
+            }.getOrNull()
+        }
+        mutableStateOf(restored.orEmpty())
+    }
+    var showLayouts by rememberSaveable { mutableStateOf(false) }
+    if (showLayouts) {
+        BoardLayoutsScreen(layouts, onChange = { updated ->
+            val encoded = org.json.JSONArray()
+            updated.forEach { encoded.put(it.toJson()) }
+            layoutPreferences.put(mapOf("layouts" to encoded.toString()))
+            layouts = updated
+        }) { showLayouts = false }
+        return@with
+    }
     val cardsPreferences = rememberGamePreferences("custom_cards")
     var customCards by remember(cardsPreferences) {
         val saved = cardsPreferences.values()["cards"]
@@ -238,6 +268,8 @@ private fun RootScreen(session: GameSession) = with(session) {
         return@with
     }
     val dicePreferences = rememberGamePreferences("dice_colors")
+    val presetPreferences = rememberGamePreferences("party_presets")
+    val presetLibrary = remember(presetPreferences) { PartyPresetLibrary(presetPreferences) }
     var diceColors by remember {
         val dice = dicePreferences.values()
         mutableStateOf(DiceColors(
@@ -249,7 +281,6 @@ private fun RootScreen(session: GameSession) = with(session) {
     }
     CompositionLocalProvider(LocalAvatars provides avatars, LocalDiceColors provides diceColors, LocalGameSession provides session) {
     if (!showAvatars) {
-    Box {
     val lesson = tutorialEngine
     val sandbox = sandboxEngine
     val room = lanRoom
@@ -257,7 +288,7 @@ private fun RootScreen(session: GameSession) = with(session) {
         val onlineGame = room.engine
         if (onlineGame == null) {
             BackHandler { closeLanRoom() }
-            LanLobby(room, customCards, onBack = ::closeLanRoom)
+            LanLobby(room, customCards, layouts, presetLibrary, onBack = ::closeLanRoom)
         } else {
             BackHandler { closeLanRoom() }
             key(onlineGame) {
@@ -282,7 +313,11 @@ private fun RootScreen(session: GameSession) = with(session) {
             onOpenCardSandbox = ::openCardSandbox,
             onOpenLan = ::openLanRoom,
             customCards = customCards,
+            layouts = layouts,
+            presetLibrary = presetLibrary,
+            onOpenLayouts = { showLayouts = true },
             onOpenCustomCards = { showCustomCards = true },
+            onOpenAppearance = { showAvatars = true },
             onStart = { names, bots, rules -> startMatch(names, bots, dlcEnabled, rules) }
         )
     } else {
@@ -298,10 +333,6 @@ private fun RootScreen(session: GameSession) = with(session) {
             }
         }
     }
-    if (sandbox == null && room == null) {
-        TextButton(onClick = { showAvatars = true }, modifier = Modifier.align(Alignment.BottomEnd)) { Text("Оформление") }
-    }
-    }
     }
     if (showAvatars) AvatarSettings(onDismiss = { showAvatars = false }, colors = diceColors, onColorsChanged = {
         diceColors = it
@@ -316,7 +347,7 @@ private fun RootScreen(session: GameSession) = with(session) {
 
 
 @Composable
-fun SetupScreen(
+internal fun SetupScreen(
     dlcEnabled: Boolean,
     onDlcToggle: (Boolean) -> Unit,
     initialNames: List<String>,
@@ -326,11 +357,13 @@ fun SetupScreen(
     onOpenCardSandbox: () -> Unit,
     onOpenLan: () -> Unit,
     customCards: List<CustomCard>,
+    layouts: List<BoardLayout>,
+    presetLibrary: PartyPresetLibrary,
+    onOpenLayouts: () -> Unit,
     onOpenCustomCards: () -> Unit,
+    onOpenAppearance: () -> Unit,
     onStart: (List<String>, Set<Int>, CustomRules) -> Unit
 ) {
-    val entrance = remember { Animatable(0f) }
-    LaunchedEffect(Unit) { entrance.animateTo(1f, tween(450)) }
     var showRules by rememberSaveable { mutableStateOf(false) }
     var setupPage by rememberSaveable { mutableIntStateOf(0) }
     var customParty by rememberSaveable { mutableStateOf(false) }
@@ -339,10 +372,11 @@ fun SetupScreen(
     var cardTrading by rememberSaveable { mutableStateOf(false) }
     var bossDuel by rememberSaveable { mutableStateOf(false) }
     var daily by rememberSaveable { mutableStateOf(false) }
-    var boardSize by rememberSaveable { mutableIntStateOf(BOARD_SIZE) }
-    var potionPlacement by rememberSaveable { mutableStateOf(PotionPlacement.STANDARD) }
-    var includeCustomCards by rememberSaveable { mutableStateOf(false) }
-    val boardOptions = BoardOptions(boardSize, potionPlacement, if (includeCustomCards) customCards else emptyList())
+    var boardOptions by rememberSaveable(stateSaver = Saver<BoardOptions, String>(
+        save = { it.toJson().toString() }, restore = { readBoardOptions(org.json.JSONObject(it)) }
+    )) { mutableStateOf(BoardOptions()) }
+    var showDeckEditor by rememberSaveable { mutableStateOf(false) }
+    val layout = boardOptions.layout
     val solo = customParty && bossDuel
     var showCatalog by remember { mutableStateOf(false) }
     val version = appVersion()
@@ -356,7 +390,7 @@ fun SetupScreen(
     BackHandler(enabled = setupPage > 0 || onResume != null) {
         if (setupPage > 0) setupPage-- else onResume?.invoke()
     }
-    var playerCount by rememberSaveable { mutableIntStateOf(initialNames.size.coerceAtLeast(2)) }
+    var playerCount by rememberSaveable { mutableIntStateOf(initialNames.size.coerceIn(2, 4)) }
     var botCount by rememberSaveable { mutableIntStateOf(initialBotCount) }
     var names by rememberSaveable(
         stateSaver = listSaver<List<String>, String>(save = { it }, restore = { it })
@@ -371,139 +405,137 @@ fun SetupScreen(
         CardCatalogScreen { showCatalog = false }
         return
     }
+    if (showRules) {
+        RulesScreen { showRules = false }
+        return
+    }
+    if (showDeckEditor) {
+        DeckEditorScreen(boardOptions, customCards, dlcEnabled, choices = customParty && choicePotions, duel = solo,
+            onApply = { boardOptions = it; showDeckEditor = false }, onBack = { showDeckEditor = false })
+        return
+    }
 
-    Column(
-        modifier = Modifier.fillMaxSize().graphicsLayer { alpha = entrance.value; translationY = (1f - entrance.value) * 32f }.imePadding().verticalScroll(rememberScrollState()).padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        if (setupPage > 0) {
-            TextButton(onClick = { setupPage-- }, modifier = Modifier.align(Alignment.Start)) { Text("Назад") }
-        }
-        if (setupPage == 0) {
-        Text("Potions and Dungeons", color = AppColors.textPrimary, fontSize = AppFonts.title, fontWeight = FontWeight.Bold)
-        Text("Переживи остальных игроков, пока босс преследует вас по полю.", color = AppColors.textMuted, textAlign = TextAlign.Center)
-        TextButton(onClick = { showRules = true }) { Text("Как играть") }
-        TextButton(onClick = onTutorial) { Text("Обучение") }
-        Spacer(Modifier.height(24.dp))
-        if (onResume != null) {
-            Button(onClick = onResume, modifier = Modifier.fillMaxWidth()) { Text("Продолжить партию") }
-        }
-        Button(onClick = { setupPage = 1 }, modifier = Modifier.fillMaxWidth()) { Text("Новая игра") }
-        OutlinedButton(onClick = onOpenLan, modifier = Modifier.fillMaxWidth()) { Text("Сетевая игра") }
-        TextButton(onClick = { showCatalog = true }) { Text("Справочник зелий") }
-        TextButton(onClick = onOpenCustomCards) { Text("Мои карты") }
-        TextButton(onClick = {
-            versionTaps++
-            if (versionTaps == 7) {
-                versionTaps = 0
-                onOpenCardSandbox()
-            }
-        }) { Text("Версия $version", color = AppColors.textMuted, fontSize = AppFonts.legend) }
-        }
+    if (setupPage == 0) {
+        HomeMenu(
+            version = version,
+            onVersion = {
+                versionTaps++
+                if (versionTaps == 7) {
+                    versionTaps = 0
+                    onOpenCardSandbox()
+                }
+            },
+            onResume = onResume,
+            onNewGame = { setupPage = 1 },
+            onNetwork = onOpenLan,
+            onTutorial = onTutorial,
+            onRules = { showRules = true },
+            onCatalog = { showCatalog = true },
+            onLayouts = onOpenLayouts,
+            onCards = onOpenCustomCards,
+            onAppearance = onOpenAppearance
+        )
+        return
+    }
 
-        if (setupPage == 1) {
-        Text("Настройки партии", fontSize = AppFonts.title, fontWeight = FontWeight.Bold)
-        BoardOptionsEditor(boardOptions, customCards) {
-            boardSize = it.size
-            potionPlacement = it.potionPlacement
-            includeCustomCards = it.customCards.isNotEmpty()
+    val participants = if (solo) 1 else playerCount
+    val starting = setupPage == 2
+    val rules = if (customParty) {
+        CustomRules(choicePotions, breakableDoors && layout == null, cardTrading && !solo, solo, daily, boardOptions)
+    } else CustomRules(board = boardOptions)
+    val deckProblem = boardOptions.deckProblem(dlcEnabled, rules.choicePotions, solo)
+    MenuPage(if (starting) "Игроки" else "Новая игра", onBack = { setupPage-- }, footer = {
+        if (starting) {
+            BoardRulesSummary(boardOptions, dlcEnabled, choices = rules.choicePotions, duel = solo, extra = buildList {
+                if (rules.bossDuel) add("дуэль с боссом")
+                if (rules.choicePotions) add("зелья с выбором")
+                if (rules.breakableDoors) add("разрушаемые двери")
+                if (rules.cardTrading) add("обмен картами")
+                if (rules.daily) add("партия дня")
+            })
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(selected = !customParty, onClick = { customParty = false }, label = { Text("Обычная") })
-            FilterChip(selected = customParty, onClick = { customParty = true }, label = { Text("Кастомная партия") })
-        }
-        if (customParty) {
-            CustomRuleSwitch("Дуэль с боссом", bossDuel) { bossDuel = it }
-            CustomRuleSwitch("Зелья с выбором", choicePotions) { choicePotions = it }
-            CustomRuleSwitch("Разрушаемые двери", breakableDoors) { breakableDoors = it }
-            if (!solo) CustomRuleSwitch("Обмен картами", cardTrading) { cardTrading = it }
-            CustomRuleSwitch("Партия дня", daily) { daily = it }
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Дополнительные зелья (DLC)", color = AppColors.textPrimary, fontSize = AppFonts.sectionLabel, modifier = Modifier.weight(1f, fill = false))
-            Spacer(Modifier.width(8.dp))
-            Switch(
-                checked = dlcEnabled,
-                onCheckedChange = onDlcToggle,
-                colors = SwitchDefaults.colors(checkedThumbColor = AppColors.accent)
-            )
-        }
-
-        if (!solo) {
-        Spacer(Modifier.height(24.dp))
-        Text("Сколько игроков?", color = AppColors.textPrimary, fontSize = AppFonts.sectionLabel)
-        Spacer(Modifier.height(8.dp))
-        Row {
-            (2..4).forEach { count ->
-                val selected = playerCount == count
-                Button(
-                    onClick = { playerCount = count; botCount = botCount.coerceAtMost(count - 1) },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (selected) AppColors.accent else AppColors.panelBg,
-                        contentColor = if (selected) AppColors.darkTextOnAccent else AppColors.textPrimary
-                    ),
-                    modifier = Modifier.padding(horizontal = 4.dp)
-                ) { Text("$count", fontSize = AppFonts.buttonText) }
-            }
-        }
-        Spacer(Modifier.height(24.dp))
-        Text("Боты", fontSize = AppFonts.sectionLabel)
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            (0 until playerCount).forEach { count ->
-                FilterChip(selected = botCount == count, onClick = { botCount = count }, label = { Text("$count") })
-            }
-        }
-        }
-        Button(onClick = { setupPage = 2 }, modifier = Modifier.fillMaxWidth()) { Text("Далее") }
-        }
-
-        if (setupPage == 2) {
-        Spacer(Modifier.height(24.dp))
-        Text("Имена игроков", color = AppColors.textPrimary, fontSize = AppFonts.sectionLabel)
-        Spacer(Modifier.height(4.dp))
-        Text("Цвет каждого игрока на доске совпадает с порядком ниже", color = AppColors.textMuted, fontSize = AppFonts.hint)
-        Spacer(Modifier.height(8.dp))
-        val participants = if (solo) 1 else playerCount
-        for (i in 0 until participants) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                Box(modifier = Modifier.size(16.dp).background(playerPalette[i % playerPalette.size], shape = CircleShape))
-                Spacer(Modifier.width(8.dp))
-                OutlinedTextField(
-                    value = names[i],
-                    onValueChange = { newValue -> names = names.mapIndexed { index, name -> if (index == i) newValue else name } },
-                    label = { Text(if (!solo && i >= playerCount - botCount) "Имя бота ${i + 1}" else "Имя игрока ${i + 1}", fontSize = AppFonts.hint) },
-                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = AppFonts.dialogBody, color = AppColors.textPrimary),
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = AppColors.textPrimary,
-                        unfocusedTextColor = AppColors.textPrimary,
-                        focusedLabelColor = AppColors.accent,
-                        unfocusedLabelColor = AppColors.textMuted,
-                        focusedBorderColor = AppColors.accent,
-                        unfocusedBorderColor = AppColors.textMuted,
-                        cursorColor = AppColors.accent
-                    ),
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                )
-            }
-        }
-
-        Spacer(Modifier.height(24.dp))
-        Button(
-            onClick = {
-                val finalNames = (0 until participants).map { i -> names[i].ifBlank { "Игрок ${i + 1}" } }
-                val rules = if (customParty) {
-                    CustomRules(choicePotions, breakableDoors, cardTrading && !solo, solo, daily, boardOptions)
-                } else CustomRules(board = boardOptions)
+        if (deckProblem != null) Text(deckProblem, color = AppColors.accent, fontSize = AppFonts.hint)
+        Button(onClick = {
+            if (!starting) {
+                setupPage = 2
+            } else {
+                val finalNames = (0 until participants).map { i -> names[i].ifBlank { "Игрок " + (i + 1) } }
                 val bots = if (solo) emptySet() else (playerCount - botCount until playerCount).toSet()
                 onStart(finalNames, bots, rules)
-            },
-            colors = ButtonDefaults.buttonColors(containerColor = AppColors.accent, contentColor = AppColors.darkTextOnAccent)
-        ) { Text("Начать игру", fontSize = AppFonts.buttonText) }
+            }
+        }, enabled = deckProblem == null, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+            Text(if (starting) "Начать игру" else "Далее · игроки")
+        }
+    }) {
+        if (starting) {
+            MenuPanel {
+                if (!solo) {
+                    Text("Сколько игроков?", fontWeight = FontWeight.Bold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        (2..4).forEach { count ->
+                            FilterChip(selected = playerCount == count, onClick = {
+                                playerCount = count
+                                botCount = botCount.coerceAtMost(count - 1)
+                            }, label = { Text("$count") })
+                        }
+                    }
+                    Text("Боты", fontWeight = FontWeight.Bold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        (0 until playerCount).forEach { count ->
+                            FilterChip(selected = botCount == count, onClick = { botCount = count }, label = { Text("$count") })
+                        }
+                    }
+                }
+                for (index in 0 until participants) {
+                    val isBot = !solo && index >= playerCount - botCount
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Box(Modifier.size(14.dp).background(playerPalette[index], CircleShape))
+                        OutlinedTextField(
+                            value = names[index],
+                            onValueChange = { value -> names = names.mapIndexed { i, name -> if (i == index) value else name } },
+                            label = { Text((if (isBot) "Имя бота " else "Имя игрока ") + (index + 1)) },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+        } else {
+            MenuPanel("Поле и колода") {
+                BoardOptionsEditor(boardOptions, customCards, layouts) { boardOptions = it }
+                HorizontalDivider(color = AppColors.boardBg)
+                CustomRuleSwitch("Дополнительные зелья (DLC)", dlcEnabled, onDlcToggle)
+                OutlinedButton(onClick = { showDeckEditor = true }, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (boardOptions.deckRecipe == null) "Настроить колоду" else "Изменить колоду")
+                }
+            }
+            MenuPanel("Режим партии") {
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(selected = !customParty, onClick = { customParty = false }, label = { Text("Обычная") })
+                    FilterChip(selected = customParty, onClick = { customParty = true }, label = { Text("Кастомная") })
+                }
+                if (customParty) {
+                    CustomRuleSwitch("Дуэль с боссом", bossDuel) { bossDuel = it }
+                    CustomRuleSwitch("Зелья с выбором", choicePotions) { choicePotions = it }
+                    if (layout == null) CustomRuleSwitch("Разрушаемые двери", breakableDoors) { breakableDoors = it }
+                    if (!solo) CustomRuleSwitch("Обмен картами", cardTrading) { cardTrading = it }
+                    CustomRuleSwitch("Партия дня", daily) { daily = it }
+                }
+            }
+            PartyPresetControls(presetLibrary, dlcEnabled, rules, onApply = { preset ->
+                val saved = preset.rules
+                boardOptions = saved.board
+                onDlcToggle(preset.dlc)
+                customParty = saved != CustomRules(board = saved.board)
+                choicePotions = saved.choicePotions
+                breakableDoors = saved.breakableDoors
+                cardTrading = saved.cardTrading
+                bossDuel = saved.bossDuel
+                daily = saved.daily
+            })
         }
     }
-    if (showRules) RulesDialog { showRules = false }
 
 }
 @Composable
@@ -527,13 +559,15 @@ private fun matchActions(engine: GameEngine): (MatchAction, Int, Int) -> Int {
 @Composable
 internal fun GameScreen(
     engine: GameEngine, onRestart: () -> Unit, onOpenSettings: () -> Unit,
-    cardSandbox: Boolean = false, lan: LanRoom? = null
+    cardSandbox: Boolean = false, lan: LanRoom? = null, playtest: Boolean = false
 ) {
     val entrance = remember { Animatable(0f) }
     LaunchedEffect(Unit) { entrance.animateTo(1f, tween(400)) }
 
     val scope = rememberCoroutineScope()
     var showInventoryFor by remember { mutableStateOf<Player?>(null) }
+    var playerDetails by remember(engine) { mutableStateOf<Player?>(null) }
+    var hoveredCell by remember(engine) { mutableStateOf<Cell?>(null) }
     var attackPreview by remember(engine) { mutableStateOf<Pair<Player, CardId>?>(null) }
     var showCardCatalog by remember { mutableStateOf(false) }
     var showSandboxCards by remember { mutableStateOf(false) }
@@ -541,6 +575,7 @@ internal fun GameScreen(
     var confirmRestart by remember { mutableStateOf(false) }
     var showGameMenu by remember { mutableStateOf(false) }
     var showLog by remember { mutableStateOf(false) }
+    var showRecap by rememberSaveable { mutableStateOf(false) }
     var diceVisible by remember { mutableStateOf(false) }
     var diceResult by remember { mutableIntStateOf(-1) }
     var diceStage by remember { mutableIntStateOf(0) }
@@ -556,6 +591,11 @@ internal fun GameScreen(
             engine.testCard(card)
             showSandboxCards = false
         }) { showSandboxCards = false }
+        return
+    }
+    if (showRecap && engine.gameOver) {
+        BackHandler { showRecap = false }
+        MatchRecapScreen(engine) { showRecap = false }
         return
     }
 
@@ -614,7 +654,7 @@ internal fun GameScreen(
     val tutorialFinished = engine.tutorial && engine.bossMoveTrigger >= 2 && !engine.awaitingBossMove
     val botTurn = engine.turnOrder.getOrNull(engine.currentTurnIndex)?.isBot == true
     MovementKeyHandler { direction ->
-        if (diceVisible || lan?.canAct == false || attackPreview != null || showInventoryFor != null ||
+        if (diceVisible || lan?.canAct == false || attackPreview != null || showInventoryFor != null || playerDetails != null ||
             showGameMenu || showLog || showRules || confirmRestart
         ) {
             false
@@ -648,136 +688,151 @@ internal fun GameScreen(
         }
     }
 
-    BoxWithConstraints(modifier = Modifier.fillMaxSize().graphicsLayer { alpha = entrance.value }.padding(16.dp)) {
-        val boardSize = minOf(maxWidth, (maxHeight * 0.48f).coerceAtLeast(240.dp))
-        Column(modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
-            Row(
-                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconTextButton(text = "Меню", enabled = !diceVisible, onClick = { showGameMenu = true })
-                IconTextButton(text = "Зелья", enabled = !diceVisible, onClick = { showCardCatalog = true })
-                IconTextButton(text = "Журнал", enabled = !diceVisible, onClick = { showLog = true })
+    val current = engine.turnOrder.getOrNull(engine.currentTurnIndex)
+    val handOwner = (if (lan == null) current?.takeUnless { it.isBot } else engine.players.getOrNull(lan.seat))
+        ?.takeIf { it.activeCards.isNotEmpty() }
+    val stepPreview = hoveredCell?.takeIf { !diceVisible && localInput && attackPreview == null }
+        ?.let(engine::previewStep)
+
+    MatchTableLayout(
+        modifier = Modifier.fillMaxSize().graphicsLayer { alpha = entrance.value }.padding(horizontal = 12.dp, vertical = 8.dp),
+        header = {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TurnGuide(engine, lan, diceVisible, stepPreview, Modifier.weight(1f))
+                if (playtest) {
+                    OutlinedButton(onClick = onOpenSettings) { Text("В редактор") }
+                } else {
+                    OutlinedButton(onClick = { showGameMenu = true }, enabled = !diceVisible) { Text("Меню") }
+                }
             }
             if (cardSandbox) {
-                Text("Полигон карт", fontSize = AppFonts.title, fontWeight = FontWeight.Bold)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        enabled = !diceVisible && attackPreview == null && engine.canTestCard,
-                        onClick = { showSandboxCards = true }
-                    ) { Text("Выдать карту") }
-                    OutlinedButton(onClick = onRestart) { Text("Сбросить") }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Button(enabled = !diceVisible && attackPreview == null && engine.canTestCard,
+                        onClick = { showSandboxCards = true }) { Text("Выдать карту") }
+                    OutlinedButton(onClick = onRestart) { Text("Сбросить полигон") }
                 }
             }
-            Spacer(Modifier.height(8.dp))
-            TurnGuide(engine)
-            if (lan != null) {
-                val player = engine.players.getOrNull(lan.seat)?.name.orEmpty()
-                Text(if (lan.paused) lan.status else "Ты играешь за $player", color = AppColors.textMuted)
-                if (!lan.hosting && !lan.connected) {
+        },
+        board = {
+            BoardView(engine, attackPreview, inputEnabled = !diceVisible && localInput,
+                onlineAvatars = lan?.avatars, onHover = { cell, hovered ->
+                    if (hovered) hoveredCell = cell else if (hoveredCell == cell) hoveredCell = null
+                })
+            if (diceVisible) key(diceStage) { DiceRollOverlay(diceResult, diceCaption, diceSides) }
+            if (!diceVisible && lan?.paused != true && engine.d4Rolls.isNotEmpty()) {
+                key(engine.d4Sequence) {
+                    D4RollOverlay(engine.d4Rolls.first()) {
+                        if (driveGame) perform(MatchAction.D4, 0, 0)
+                    }
+                }
+            }
+        },
+        roster = { detailed ->
+            MatchRoster(engine, lan?.avatars, detailed) { player ->
+                if (!diceVisible && attackPreview == null) {
+                    if (engine.pendingChoice is PendingChoice.ChoosePlayer) {
+                        if (localInput && !botTurn) perform(MatchAction.PLAYER, engine.players.indexOf(player), 0)
+                    } else {
+                        playerDetails = player
+                    }
+                }
+            }
+        },
+        controls = {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (lan != null && !lan.hosting && !lan.connected) {
                     OutlinedButton(onClick = lan::reconnect, enabled = !lan.busy) { Text("Переподключиться") }
                 }
-            }
-            if (engine.duelExit != null && !engine.gameOver) {
-                Text(
-                    if (engine.duelKeys.isEmpty()) "Все ключи собраны. Закончи движение на выходе."
-                    else "Ключи: ${3 - engine.duelKeys.size}/3 · закончи движение на клетке с ключом.",
-                    fontSize = AppFonts.hint, color = AppColors.textMuted
-                )
-            }
-            if (tutorialFinished) {
-                Button(onClick = onOpenSettings) { Text("Завершить обучение") }
-            }
-            Spacer(Modifier.height(12.dp))
-            PlayersRow(engine, lan?.avatars, onPlayerClick = { player ->
-                if (!localInput || botTurn || diceVisible || attackPreview != null) return@PlayersRow
-                if (engine.pendingChoice is PendingChoice.ChoosePlayer) {
-                    perform(MatchAction.PLAYER, engine.players.indexOf(player), 0)
-                } else if (player.activeCards.isNotEmpty() && (lan == null || engine.isCurrentPlayer(player))) {
-                    showInventoryFor = player
-                }
-            })
-
-            Spacer(Modifier.height(8.dp))
-            Box(modifier = Modifier.height(boardSize).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                BoardView(engine, attackPreview, inputEnabled = !diceVisible && localInput, onlineAvatars = lan?.avatars)
-                if (diceVisible) key(diceStage) { DiceRollOverlay(diceResult, diceCaption, diceSides) }
-                if (!diceVisible && lan?.paused != true && engine.d4Rolls.isNotEmpty()) {
-                    key(engine.d4Sequence) {
-                        D4RollOverlay(engine.d4Rolls.first()) {
-                            if (driveGame) perform(MatchAction.D4, 0, 0)
+                val preview = attackPreview
+                when {
+                    preview != null -> {
+                        val (player, card) = preview
+                        Text(card.displayName(), fontWeight = FontWeight.Bold)
+                        Text(
+                            if (card == CardId.ATTACK) "Золотым отмечены соседние клетки с целями."
+                            else "Направление определит д4 по номерам стен: 1 ↑  2 →  3 ↓  4 ←.",
+                            color = AppColors.textMuted, fontSize = AppFonts.hint
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(enabled = localInput && engine.canPlayActiveCard(player, card), onClick = {
+                                attackPreview = null
+                                perform(MatchAction.CARD, engine.players.indexOf(player), card.ordinal)
+                            }) { Text("Сыграть карту") }
+                            OutlinedButton(onClick = { attackPreview = null }) { Text("Отмена") }
+                        }
+                    }
+                    tutorialFinished -> Button(onClick = onOpenSettings, modifier = Modifier.fillMaxWidth()) {
+                        Text("Завершить обучение")
+                    }
+                    engine.gameOver -> {
+                        Button(onClick = { showRecap = true }, modifier = Modifier.fillMaxWidth()) {
+                            Text("Разбор партии")
+                        }
+                        OutlinedButton(onClick = onRestart, modifier = Modifier.fillMaxWidth()) {
+                            Text(if (lan == null) "Новая игра" else "Покинуть комнату")
+                        }
+                        if (lan?.hosting == true) {
+                            Button(onClick = lan::rematch, enabled = lan.canRematch, modifier = Modifier.fillMaxWidth()) {
+                                Text("Играть снова")
+                            }
+                        }
+                    }
+                    else -> {
+                        if (localInput && !botTurn && engine.pendingSteps == 0 && !engine.hasPendingAction &&
+                            !engine.awaitingBossMove && !engine.awaitingRollDecision &&
+                            (engine.mustSkipCurrentTurn() || !engine.canMoveAsKnight())) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                Box(Modifier.weight(1f)) {
+                                    DiceButton(engine, diceVisible ||
+                                        engine.tutorial && engine.bossMoveTrigger == 1 && !engine.attackCardPlayed) {
+                                        rollWithAnimation()
+                                    }
+                                }
+                            }
+                        }
+                        if (localInput && !diceVisible && engine.canReroll && !botTurn) {
+                            OutlinedButton(onClick = { rollWithAnimation(reroll = true) }, modifier = Modifier.fillMaxWidth()) {
+                                Text("Перебросить кубик")
+                            }
+                        }
+                        if (localInput && !diceVisible && engine.awaitingRollDecision) {
+                            TextButton(onClick = { perform(MatchAction.ACCEPT, 0, 0) }, modifier = Modifier.fillMaxWidth()) {
+                                Text("Оставить бросок (" + engine.lastDiceRoll + ")")
+                            }
+                        }
+                        if (handOwner != null && !diceVisible && !engine.hasPendingAction) {
+                            OutlinedButton(onClick = { showInventoryFor = handOwner }) {
+                                Text("Рука · " + handOwner.activeCards.size)
+                            }
                         }
                     }
                 }
             }
-
-
-
-            Text("Бирюзовый — ход · Золотой — цель или зелье · ! — риск атаки", color = AppColors.textMuted, fontSize = AppFonts.legend)
-            Spacer(Modifier.height(8.dp))
-            val preview = attackPreview
-            if (preview != null) {
-                val (player, card) = preview
-                Text(card.displayName(), fontWeight = FontWeight.Bold)
-                Text(
-                    if (card == CardId.ATTACK) "Золотым отмечены соседние клетки с целями."
-                    else "Направление определит д4 по номерам стен: 1 ↑  2 →  3 ↓  4 ←.",
-                    color = AppColors.textMuted,
-                    fontSize = AppFonts.hint
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(enabled = localInput && engine.canPlayActiveCard(player, card), onClick = {
-                        attackPreview = null
-                        perform(MatchAction.CARD, engine.players.indexOf(player), card.ordinal)
-                    }) { Text("Сыграть карту") }
-                    OutlinedButton(onClick = { attackPreview = null }) { Text("Отмена") }
-                }
-            } else {
-                key(engine.d4Sequence) {
-                    DiceButton(engine, scope, !localInput || diceVisible || engine.d4Rolls.isNotEmpty() || botTurn || engine.awaitingRollDecision || tutorialFinished || engine.tutorial && engine.bossMoveTrigger == 1 && !engine.attackCardPlayed) {
-                        rollWithAnimation()
-                    }
-                }
-                if (localInput && !diceVisible && engine.canReroll && !botTurn) {
-                    OutlinedButton(onClick = { rollWithAnimation(reroll = true) }, modifier = Modifier.fillMaxWidth()) {
-                        Text("Перебросить кубик")
-                    }
-                }
-                if (localInput && !diceVisible && engine.awaitingRollDecision) {
-                    TextButton(
-                        onClick = { perform(MatchAction.ACCEPT, 0, 0) },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("Оставить бросок (${engine.lastDiceRoll})") }
-                }
-            }
-            if (engine.gameOver) {
-                Button(onClick = onRestart, modifier = Modifier.fillMaxWidth()) {
-                    Text(if (lan == null) "Новая игра" else "Покинуть комнату")
-                }
-                if (lan?.hosting == true) {
-                    Button(onClick = lan::rematch, enabled = lan.canRematch, modifier = Modifier.fillMaxWidth()) {
-                        Text("Играть снова")
-                    }
-                }
-            }
-            val current = engine.turnOrder.getOrNull(engine.currentTurnIndex)
-            if (localInput && preview == null && !diceVisible && !engine.attackCardPlayed && !engine.awaitingRollDecision && current != null && current.activeCards.isNotEmpty() && engine.pendingSteps == 0 &&
-                !engine.awaitingBossMove && !engine.hasPendingAction && !engine.mustSkipCurrentTurn() && !engine.gameOver
-            ) {
-                OutlinedButton(onClick = { showInventoryFor = current }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Карты в руке (${current.activeCards.size})")
-                }
-            }
-            Spacer(Modifier.height(8.dp))
         }
+    )
+
+    val blockingChoice = engine.cardReveal != null || engine.pendingChoice != null ||
+        engine.d4Rolls.isNotEmpty() || engine.tradePartners.isNotEmpty()
+    LaunchedEffect(blockingChoice) { if (blockingChoice) playerDetails = null }
+    playerDetails?.takeUnless { blockingChoice }?.let { player ->
+        val maySeeHand = !player.isBot && player.activeCards.isNotEmpty() &&
+            (lan == null || engine.players.getOrNull(lan.seat) === player)
+        MatchPlayerSheet(player, onDismiss = { playerDetails = null },
+            onOpenHand = if (maySeeHand) ({
+                playerDetails = null
+                showInventoryFor = player
+            }) else null)
     }
 
-    showInventoryFor?.takeIf { localInput }?.let { player ->
-        InventoryDialog(engine, player, onDismiss = { showInventoryFor = null }, onPreview = { card ->
-            showInventoryFor = null
-            attackPreview = player to card
-        })
+    LaunchedEffect(blockingChoice) { if (blockingChoice) showInventoryFor = null }
+    showInventoryFor?.takeUnless { blockingChoice }?.let { player ->
+        InventoryDialog(engine, player, onDismiss = { showInventoryFor = null },
+            networkBlock = if (!localInput) (if (lan?.paused == true) lan.status else "Дождись своей очереди.") else null,
+            onPreview = { card ->
+                showInventoryFor = null
+                attackPreview = player to card
+            })
     }
     if (attackPreview != null) {
         BackHandler { attackPreview = null }
@@ -799,6 +854,8 @@ internal fun GameScreen(
             title = { Text("Пауза") },
             text = { Column {
                 TextButton(onClick = { showGameMenu = false; showRules = true }) { Text("Как играть") }
+                TextButton(onClick = { showGameMenu = false; showCardCatalog = true }) { Text("Справочник зелий") }
+                TextButton(onClick = { showGameMenu = false; showLog = true }) { Text("Журнал партии") }
                 TextButton(onClick = { showGameMenu = false; onOpenSettings() }) { Text("Главное меню") }
                 if (lan == null) {
                     TextButton(onClick = { showGameMenu = false; confirmRestart = true }) { Text("Начать заново") }
@@ -826,7 +883,7 @@ internal fun GameScreen(
         }
     }
     engine.cardReveal?.takeIf { localInput }?.let { event ->
-        if (event.bot && event.card.choiceReward != null) {
+        if (event.bot && event.choiceReward != null) {
             LaunchedEffect(event) {
                 delay(500)
                 if (engine.cardReveal === event) perform(MatchAction.POTION, if (event.canCleanse) 1 else 0, 0)
@@ -889,154 +946,104 @@ private fun TradeDialog(
 }
 
 @Composable
-private fun TurnGuide(engine: GameEngine) {
+private fun TurnGuide(engine: GameEngine, lan: LanRoom?, rolling: Boolean, preview: StepPreview?, modifier: Modifier = Modifier) {
     val current = engine.turnOrder.getOrNull(engine.currentTurnIndex)
+    val seat = lan?.let { engine.players.getOrNull(it.seat) }
     val heading = when {
         engine.gameOver -> "Итог партии"
+        lan?.connected == false || lan?.paused == true -> "Партия на паузе"
+        rolling || engine.d4Rolls.isNotEmpty() -> "Бросок кубика"
+        engine.cardReveal != null -> "Зелье подобрано"
         engine.awaitingBossMove -> "Ход босса"
-        else -> "Ход: ${current?.name.orEmpty()}"
+        lan != null && seat !== current -> "Ждём ход ${current?.name.orEmpty()}"
+        engine.pendingChoice != null -> "Выбери цель"
+        engine.tutorial && current === engine.players.firstOrNull() -> "Твой ход"
+        seat != null && seat === current -> "Твой ход"
+        else -> current?.name?.let { "Ходит $it" }.orEmpty()
     }
+    val steps = if (!engine.gameOver && lan?.connected != false && lan?.paused != true &&
+        !rolling && !engine.awaitingBossMove && !engine.hasPendingAction && engine.pendingSteps > 0 &&
+        (lan == null || seat === current)
+    ) " · шагов: ${engine.pendingSteps}" else ""
     val instruction = when {
+        engine.gameOver -> engine.statusText
+        lan?.connected == false || lan?.paused == true -> lan.status
+        preview != null -> buildList {
+            if (preview.slips) add("Кожурка прервёт движение")
+            else if (preview.picksPotion) add("Подберёшь зелье")
+            if (preview.endsMovement && !preview.slips) add("Движение закончится")
+            else if (!preview.endsMovement) add("Можно идти дальше")
+            if (preview.risksAttack) add("Риск атаки босса")
+        }.joinToString(" · ")
         engine.tutorial && engine.bossMoveTrigger >= 2 && !engine.awaitingBossMove -> "Обучение пройдено."
         engine.tutorial && engine.pendingChoice != null -> "Выбери клетку босса, чтобы оглушить его."
         engine.tutorial && engine.attackCardPlayed && engine.pendingSteps > 0 -> "Отойди от босса на подсвеченную клетку."
         engine.tutorial && engine.pendingSteps > 0 && current?.isBot == false -> "Нажми на клетку с зельем. Оно попадёт в руку."
-        engine.tutorial && engine.bossMoveTrigger == 1 && !engine.attackCardPlayed && current?.isBot == false && !engine.awaitingBossMove -> "Открой «Карты в руке» и разыграй «Атаку»."
-        engine.gameOver -> engine.statusText
-        engine.awaitingBossMove -> "Босс движется к ближайшему видимому игроку."
-        current?.isBot == true -> "Бот выполняет свой ход."
+        engine.tutorial && engine.bossMoveTrigger == 1 && !engine.attackCardPlayed && current?.isBot == false && !engine.awaitingBossMove -> "Открой «Рука» и разыграй «Атаку»."
+        rolling || engine.awaitingBossMove -> null
+        seat != null && seat !== current -> "Ты играешь за ${seat.name}"
+        current?.isBot == true -> null
         engine.hasPendingAction -> engine.statusText
-        engine.mustSkipCurrentTurn() -> "Нажми «Пропустить ход», чтобы передать очередь."
-        engine.pendingSteps > 0 -> "Осталось шагов: ${engine.pendingSteps}. Нажми на клетку с бирюзовым контуром."
+        engine.mustSkipCurrentTurn() -> "Нужно пропустить ход"
         engine.canMoveAsKnight() -> "Выбери выделенную клетку буквой «Г»."
         current?.effects?.has(CardId.HORSE) == true -> "Доступных клеток для коня нет. Пропусти ход."
-        engine.attackCardPlayed -> "Карта разыграна. Брось кубик, чтобы продолжить ход."
-        current?.activeCards?.isNotEmpty() == true -> "Брось кубик или разыграй карту из руки."
-        else -> "Брось кубик, чтобы узнать, сколько шагов можно сделать."
+        engine.duelExit != null && engine.duelKeys.isEmpty() -> "Все ключи собраны · закончи движение на выходе"
+        engine.duelExit != null -> "Ключи: ${3 - engine.duelKeys.size}/3"
+        else -> null
     }
-    Column(modifier = Modifier.fillMaxWidth().animateContentSize().shadow(6.dp, RoundedCornerShape(18.dp)).background(Brush.horizontalGradient(listOf(AppColors.panelBg, Color(0xFF294754))), RoundedCornerShape(18.dp)).border(1.dp, AppColors.moveHighlight.copy(alpha = 0.2f), RoundedCornerShape(18.dp)).padding(14.dp)) {
-        Text(heading, color = AppColors.accent, fontSize = AppFonts.sectionLabel, fontWeight = FontWeight.Bold)
-        Text(instruction, color = AppColors.textPrimary, fontSize = AppFonts.hint)
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(heading + steps, color = AppColors.accent, fontSize = AppFonts.sectionLabel,
+            fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(instruction.orEmpty(), color = AppColors.textPrimary, fontSize = AppFonts.hint,
+            minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        if (engine.bossUpgradesEnabled) {
+            val next = engine.nextBossUpgrade
+            val upgrade = when {
+                engine.gameOver -> ""
+                next == null -> "Босс получил оба усиления"
+                else -> "${next.label} · осталось ходов босса: ${next.completedRounds - engine.completedBossRounds}"
+            }
+            Text(upgrade, color = AppColors.textMuted, fontSize = AppFonts.legend,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+private val ruleSections = listOf(
+    "Цель партии" to "Останься последним игроком на поле.",
+    "Ход" to ("Брось кубик и двигайся по выделенным клеткам по горизонтали или вертикали. Сразу возвращаться на предыдущую клетку нельзя." +
+        if (supportsMovementKeys) " На ПК можно ходить клавишами WASD. Для хода конём выбери клетку мышью." else ""),
+    "Зелья и карты" to "Закончи движение на клетке с флаконом, чтобы подобрать зелье. Круглые флаконы относятся к базовой колоде, угловатые — к DLC. Карты из руки разыгрываются в начале хода. После «Атаки», «Пикси» и «Тарана» можно походить.",
+    "Босс" to "Босс атакует в свой ход. Красные клетки показывают зону атаки. При игре с DLC клетку босса нужно обходить.",
+    "Подсказки на поле" to ("Бирюзовый контур показывает доступный ход, золотой — цель или клетку, где подберёшь зелье. " +
+        "Значок «+» обозначает подбор зелья, «✓» — конец движения, «!» — риск атаки. Цель также можно выбрать в списке игроков." +
+        if (supportsMovementKeys) " Наведи указатель на доступную клетку, чтобы увидеть подсказку над полем." else "")
+)
+
+@Composable
+private fun RulesScreen(onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    MenuPage("Как играть", onBack) {
+        ruleSections.forEach { (title, description) -> MenuPanel(title) { Text(description) } }
     }
 }
 
 @Composable
 private fun RulesDialog(onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Как играть") },
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Как играть") },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Понятно") } },
         text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Цель — остаться последним игроком на поле.")
-                Text("Брось кубик и двигайся по выделенным клеткам. Ходи по горизонтали или вертикали. Сразу вернуться на предыдущую клетку нельзя.")
-                if (supportsMovementKeys) Text("После броска можно двигаться клавишами WASD. Для хода конём выбери клетку мышью.")
-                Text("Если закончишь движение на клетке с флаконом, подберёшь зелье. Округлые флаконы — базовая колода, угловатые — DLC. В партии с DLC клетку босса нужно обходить. Некоторые карты попадают в руку. Их можно разыграть в начале своего хода. После «Атаки», «Пикси» или «Тарана» можно походить.")
-                Text("Босс атакует только в свой ход. Красные клетки показывают зону его атаки.")
-                Text("Если игра просит выбрать цель, нажми на клетку с золотым контуром или на выделенного игрока над полем.")
-            }
-        }
-    )
-}
-
-@Composable
-fun IconTextButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
-    Button(
-        onClick = onClick,
-        enabled = enabled,
-        colors = ButtonDefaults.buttonColors(containerColor = AppColors.panelBg, contentColor = AppColors.textPrimary),
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-    ) { Text(text, fontSize = AppFonts.chip) }
-}
-
-@Composable
-internal fun PlayersRow(engine: GameEngine, onlineAvatars: Map<Int, LanAvatar>? = null, onPlayerClick: (Player) -> Unit) {
-    Row(modifier = Modifier.fillMaxWidth().height(100.dp).horizontalScroll(rememberScrollState())) {
-        engine.players.forEachIndexed { index, p ->
-            val color = playerPalette[index % playerPalette.size]
-            val isCurrent = engine.turnOrder.getOrNull(engine.currentTurnIndex) == p
-            val playerBackground by animateColorAsState(if (isCurrent) AppColors.panelBg else AppColors.boardBg, tween(300))
-            val isChoice = (engine.pendingChoice as? PendingChoice.ChoosePlayer)?.allowed?.invoke(p) == true
-            Column(
-                modifier = Modifier
-                    .padding(end = 8.dp)
-                    .fillMaxHeight()
-                    .background(
-                        playerBackground,
-                        shape = RoundedCornerShape(10.dp)
-                    )
-                    .border(
-                        width = if (isCurrent || isChoice) 2.dp else 0.dp,
-                        color = if (isCurrent || isChoice) AppColors.accent else Color.Transparent,
-                        shape = RoundedCornerShape(10.dp)
-                    )
-                    .clickable { onPlayerClick(p) }
-                    .verticalScroll(rememberScrollState())
-                    .padding(8.dp)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    val avatar = onlineAvatars?.get(index)
-                    if (avatar == null) {
-                        Box(modifier = Modifier.size(12.dp).background(color, shape = CircleShape))
-                    } else {
-                        LanAvatarImage(avatar, Modifier.size(24.dp))
-                    }
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = if (p.alive) (if (p.isBot) "${p.name} · бот" else p.name) else "${p.name} (выбыл)",
-                        color = if (p.alive) AppColors.textPrimary else AppColors.textMuted,
-                        fontSize = AppFonts.chip
-                    )
-                }
-                if (p.effects.isNotEmpty()) {
-                    Spacer(Modifier.height(4.dp))
-                    Row {
-                        p.effects.forEach { eff ->
-                            Box(
-                                modifier = Modifier
-                                    .padding(end = 4.dp)
-                                    .background(
-                                        if (eff.category == EffectCategory.TEMPORARY) AppColors.effectTemporary else AppColors.effectOther,
-                                        shape = RoundedCornerShape(4.dp)
-                                    )
-                                    .padding(horizontal = 4.dp, vertical = 2.dp)
-                            ) {
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(eff.id.displayName(), color = Color.White, fontSize = AppFonts.chipCounter)
-                                    if (eff.category == EffectCategory.TEMPORARY) {
-                                        Text(
-                                            text = eff.turnsLeft.toString(),
-                                            color = Color.White,
-                                            fontSize = AppFonts.chipCounter,
-                                            fontWeight = FontWeight.Bold,
-                                            modifier = Modifier
-                                                .background(AppColors.boardBg, CircleShape)
-                                                .padding(horizontal = 5.dp)
-                                                .semantics { contentDescription = "Осталось ходов: ${eff.turnsLeft}" }
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if (p.skipNextTurn || p.stunnedTurns > 0) {
-                    Text("Стан · пропуск хода", color = AppColors.accent, fontSize = AppFonts.chipCounter)
-                }
-                if (p.activeCards.isNotEmpty()) {
-                    Spacer(Modifier.height(4.dp))
-                    Text("Инвентарь: ${p.activeCards.size}", color = AppColors.accent, fontSize = AppFonts.chipCounter)
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                ruleSections.forEach { (title, description) ->
+                    Text(title, color = AppColors.accent, fontWeight = FontWeight.Bold)
+                    Text(description)
                 }
             }
-        }
-    }
+        })
 }
 
 @Composable
-fun DiceButton(engine: GameEngine, scope: kotlinx.coroutines.CoroutineScope, isRolling: Boolean, onRoll: () -> Unit) {
+private fun DiceButton(engine: GameEngine, isRolling: Boolean, onRoll: () -> Unit) {
 
     val current = engine.turnOrder.getOrNull(engine.currentTurnIndex)
     val mustSkip = engine.mustSkipCurrentTurn()
@@ -1106,11 +1113,12 @@ private fun DiceRollOverlay(result: Int, caption: String? = null, sides: Int = 6
 
 private val cellGap = 4.dp
 private val boardMargin = 4.dp
+private val boardFrameInset = 8.dp
 
 @Composable
 internal fun BoardView(
     engine: GameEngine, attackPreview: Pair<Player, CardId>? = null, inputEnabled: Boolean = true,
-    onlineAvatars: Map<Int, LanAvatar>? = null
+    onlineAvatars: Map<Int, LanAvatar>? = null, onHover: (Cell, Boolean) -> Unit = { _, _ -> }
 ) {
     val perform = matchActions(engine)
     val attackZone = engine.bossAttackZoneCells()
@@ -1131,20 +1139,29 @@ internal fun BoardView(
     BoxWithConstraints(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         val available = (minOf(maxWidth, maxHeight) - boardMargin * 2).coerceAtLeast(0.dp)
         val size = engine.boardSize
-        val step = available / size
-        val cellSize = (step - cellGap).coerceAtLeast(0.dp)
-        val boardSize = step * size
+        val density = LocalDensity.current
+        val inset = with(density) { boardFrameInset.roundToPx().toDp() }
+        val gap = with(density) { cellGap.roundToPx().toDp() }
+        val step = with(density) {
+            ((available.roundToPx() - 2 * inset.roundToPx() + gap.roundToPx()).coerceAtLeast(0) / size).toDp()
+        }
+        val cellSize = (step - gap).coerceAtLeast(0.dp)
+        val boardSize = (step * (size - 1) + cellSize + inset * 2).coerceAtMost(available)
         val mid = size / 2
 
+        val frame = RoundedCornerShape(18.dp)
         Box(
             modifier = Modifier
                 .size(boardSize)
-                .shadow(12.dp, RoundedCornerShape(14.dp))
-                .background(AppColors.boardBg, shape = RoundedCornerShape(14.dp))
+                .shadow(14.dp, frame)
+                .background(Brush.radialGradient(listOf(Color(0xFF304653), Color(0xFF101C27))), frame)
+                .border(1.dp, AppColors.wallNumber.copy(alpha = 0.22f), frame)
+                .padding(inset)
         ) {
             for (r in 0 until size) {
                 for (c in 0 until size) {
                     val cell = Cell(r, c)
+                    if (!engine.isBoardCell(cell)) continue
                     val selectable = inputEnabled && attackPreview == null && engine.isSelectableBoardCell(cell)
                     val dangerous = cell in attackZone
                     val door = cell in engine.doors
@@ -1152,25 +1169,42 @@ internal fun BoardView(
                     val duelExit = cell == engine.duelExit
                     val potion = engine.potions.firstOrNull { it.position == cell }
                     val shape = RoundedCornerShape(6.dp)
-                    val lastStep = selectable && !engine.hasPendingAction &&
-                        (engine.pendingSteps == 1 || engine.pendingSteps == 0 && engine.canMoveAsKnight())
-                    val risky = lastStep && engine.lastStepRisk(cell)
-                    val outline = if (engine.pendingChoice != null || lastStep && potion != null) AppColors.cellHighlight else AppColors.moveHighlight
+                    val stepPreview = if (selectable) engine.previewStep(cell) else null
+                    val risky = stepPreview?.risksAttack == true
+                    val outline = if (engine.pendingChoice != null || stepPreview?.picksPotion == true) AppColors.cellHighlight else AppColors.moveHighlight
+                    val hoverModifier = if (supportsMovementKeys && stepPreview != null) {
+                        val source = remember(cell) { MutableInteractionSource() }
+                        val hovered by source.collectIsHoveredAsState()
+                        val updateHover by rememberUpdatedState(onHover)
+                        if (hovered) DisposableEffect(cell) {
+                            updateHover(cell, true)
+                            onDispose { updateHover(cell, false) }
+                        }
+                        Modifier.hoverable(source)
+                    } else Modifier
                     val tileColor by animateColorAsState(
-                        if (door) Color(0xFF62452E) else if (dangerous) AppColors.bossAttackZone else if (selectable) Color(0xFF30584F) else AppColors.cellBg,
+                        when {
+                            door -> Color(0xFF674B32)
+                            dangerous -> AppColors.bossAttackZone
+                            selectable -> Color(0xFF30584F)
+                            (r + c) % 2 == 0 -> AppColors.cellBg
+                            else -> Color(0xFF263544)
+                        },
                         tween(240)
                     )
-                    val tileScale by animateFloatAsState(if (selectable) 0.96f else 1f, spring())
                     Box(
                         modifier = Modifier
                             .offset(x = step * c, y = step * r)
                             .size(cellSize)
-                            .graphicsLayer { scaleX = tileScale; scaleY = tileScale }
-                            .background(tileColor, shape)
+                            .then(hoverModifier)
+                            .background(Brush.verticalGradient(listOf(
+                                androidx.compose.ui.graphics.lerp(tileColor, Color.White, 0.045f),
+                                androidx.compose.ui.graphics.lerp(tileColor, Color.Black, 0.14f)
+                            )), shape)
                             .then(when {
                                 cell in previewCells -> Modifier.border(2.dp, AppColors.cellHighlight, shape)
                                 selectable -> Modifier.border(2.dp, outline, shape)
-                                else -> Modifier
+                                else -> Modifier.border(1.dp, Color.White.copy(alpha = 0.07f), shape)
                             })
                             .semantics {
                                 contentDescription = buildString {
@@ -1180,6 +1214,8 @@ internal fun BoardView(
                                     if (duelExit) append(", выход")
                                     if (dangerous) append(", зона атаки")
                                     if (risky) append(", босс может достать в конце раунда")
+                                    if (stepPreview?.endsMovement == true) append(", движение закончится")
+                                    if (stepPreview?.picksPotion == true) append(", подберёшь зелье")
                                     if (cell in engine.bananaPeels) append(", кожурка")
                                     if (potion != null) append(if (potion.revealed) ", ${potion.card.name}" else ", закрытое зелье")
                                     engine.players.filter { it.alive && it.position == cell }.forEach { append(", ${it.name}") }
@@ -1193,6 +1229,11 @@ internal fun BoardView(
                         }
                         if (risky) Text("!", color = Color(0xFFFFA5A5), fontWeight = FontWeight.Bold,
                             modifier = Modifier.align(Alignment.TopEnd).padding(end = 4.dp))
+                        if (stepPreview?.endsMovement == true) {
+                            Text(if (stepPreview.picksPotion) "+" else "✓",
+                                color = outline, fontSize = AppFonts.legend, fontWeight = FontWeight.Bold,
+                                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 4.dp))
+                        }
                     }
                 }
             }
@@ -1287,15 +1328,21 @@ fun BossView(boss: BossUnit, step: androidx.compose.ui.unit.Dp, cellSize: androi
 @Composable
 fun PotionView(potion: Potion, step: androidx.compose.ui.unit.Dp, cellSize: androidx.compose.ui.unit.Dp, boardSize: Int = BOARD_SIZE) {
     val scale = remember { Animatable(1f) }
+    val x by animateDpAsState(step * potion.position.col, tween(280))
+    val y by animateDpAsState(step * potion.position.row, tween(280))
     LaunchedEffect(potion.usedTrigger) {
         if (potion.usedTrigger > 0) {
-            scale.snapTo(1.5f)
+            scale.snapTo(1.22f)
             scale.animateTo(1f, animationSpec = tween(350))
         }
     }
     Box(
-        modifier = Modifier.offset(x = step * potion.position.col, y = step * potion.position.row)
-            .size(cellSize).graphicsLayer(scaleX = scale.value, scaleY = scale.value),
+        modifier = Modifier.offset { IntOffset(x.roundToPx(), y.roundToPx()) }
+            .size(cellSize).graphicsLayer {
+                scaleX = scale.value
+                scaleY = scale.value
+                translationY = -(scale.value - 1f) * size.height * 0.6f
+            },
 
         contentAlignment = Alignment.Center
     ) {
@@ -1334,31 +1381,39 @@ fun LogPanel(engine: GameEngine) {
 }
 
 @Composable
-fun InventoryDialog(engine: GameEngine, player: Player, onDismiss: () -> Unit, onPreview: (CardId) -> Unit) {
+fun InventoryDialog(
+    engine: GameEngine, player: Player, onDismiss: () -> Unit, onPreview: (CardId) -> Unit,
+    networkBlock: String? = null
+) {
     val perform = matchActions(engine)
+    var selectedRestriction by remember(player) { mutableStateOf<CardId?>(null) }
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = { TextButton(onClick = onDismiss) { Text("Закрыть", fontSize = AppFonts.buttonText) } },
         title = { Text("Инвентарь ${player.name}", fontSize = AppFonts.dialogTitle) },
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                player.activeCards.forEach { card ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(enabled = engine.canPlayActiveCard(player, card)) {
-                                if (ActiveCardResolver.allowsMovementAfterUse(card)) {
-                                    onPreview(card)
-                                } else {
-                                    perform(MatchAction.CARD, engine.players.indexOf(player), card.ordinal)
-                                    onDismiss()
-                                }
+                player.activeCards.groupingBy { it }.eachCount().forEach { (card, count) ->
+                    val restriction = engine.activeCardUnavailableReason(player, card) ?: networkBlock
+                    val movement = ActiveCardResolver.allowsMovementAfterUse(card)
+                    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                        val title = if (count == 1) card.displayName() else "${card.displayName()} ×$count"
+                        Text(title, fontSize = AppFonts.inventoryCard, fontWeight = FontWeight.Bold)
+                        Text(if (movement) "После карты можно ходить" else "Карта завершает ход",
+                            color = AppColors.accent, fontSize = AppFonts.legend)
+                        Text(CARD_DESCRIPTIONS.getValue(card), fontSize = AppFonts.hint, color = AppColors.textMuted)
+                        TextButton(onClick = {
+                            if (restriction != null) {
+                                selectedRestriction = if (selectedRestriction == card) null else card
+                            } else if (movement) {
+                                onPreview(card)
+                            } else {
+                                perform(MatchAction.CARD, engine.players.indexOf(player), card.ordinal)
+                                onDismiss()
                             }
-                            .padding(vertical = 8.dp)
-                    ) {
-                        Column {
-                            Text(card.displayName(), fontSize = AppFonts.inventoryCard, fontWeight = FontWeight.Bold)
-                            Text(CARD_DESCRIPTIONS[card] ?: "", fontSize = AppFonts.hint, color = AppColors.textMuted)
+                        }) { Text(if (restriction == null) "Сыграть карту" else "Почему недоступна?") }
+                        if (selectedRestriction == card && restriction != null) {
+                            Text(restriction, color = AppColors.accent, fontSize = AppFonts.hint)
                         }
                     }
                 }
@@ -1376,10 +1431,7 @@ fun CardCatalogScreen(onSelectCard: ((CardId) -> Unit)? = null, pickupOnly: Bool
             card.displayName().contains(query.trim(), ignoreCase = true)
     }
     BackHandler(onBack = onDismiss)
-    Column(Modifier.fillMaxSize().imePadding().padding(24.dp)) {
-        TextButton(onClick = onDismiss) { Text("Назад") }
-        Text(if (onSelectCard == null) "Справочник зелий" else "Выбери карту", fontSize = AppFonts.title, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(16.dp))
+    MenuPage(if (onSelectCard == null) "Справочник зелий" else "Выбери карту", onDismiss, scroll = false) {
         OutlinedTextField(query, { query = it }, label = { Text("Поиск по названию") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             FilterChip(selected = deckFilter == null, onClick = { deckFilter = null }, label = { Text("Все") })
@@ -1388,19 +1440,25 @@ fun CardCatalogScreen(onSelectCard: ((CardId) -> Unit)? = null, pickupOnly: Bool
         }
         if (matchingCards.isEmpty()) Text("Ничего не найдено. Попробуй другое название.")
         key(deckFilter, query) {
-            Column(modifier = Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
-                matchingCards.forEach { card ->
-                    Column(modifier = Modifier.fillMaxWidth()
-                        .then(if (onSelectCard == null) Modifier else Modifier.clickable { onSelectCard(card) })
-                        .padding(vertical = 8.dp)) {
+            LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(matchingCards, key = { it.name }) { card ->
+                    val click = if (onSelectCard == null) Modifier else Modifier
+                        .clip(RoundedCornerShape(18.dp)).clickable { onSelectCard(card) }
+                    MenuPanel(modifier = click) {
                         val source = if (card.isDlc) "DLC" else "Базовое"
                         val usage = when {
                             ActiveCardResolver.allowsMovementAfterUse(card) -> "В руку · перед движением"
                             card.isActive -> "В руку · вместо движения"
                             else -> "Сразу при подборе"
                         }
-                        Text(card.displayName(), fontSize = AppFonts.inventoryCard, fontWeight = FontWeight.Bold)
-                        Text("$source · $usage", fontSize = AppFonts.legend, color = AppColors.accent)
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            PotionIcon(if (card.isDlc) DeckSource.DLC else DeckSource.BASE,
+                                card.ordinal % 4, Modifier.size(32.dp))
+                            Column {
+                                Text(card.displayName(), fontWeight = FontWeight.Bold)
+                                Text("$source · $usage", fontSize = AppFonts.legend, color = AppColors.accent)
+                            }
+                        }
                         Text(CARD_DESCRIPTIONS.getValue(card), fontSize = AppFonts.hint, color = AppColors.textMuted)
                     }
                 }
@@ -1429,15 +1487,25 @@ fun EffectChoiceDialog(choice: PendingChoice.ChooseEffect, onEffectSelected: (Ac
 
 @Composable
 private fun CardRevealDialog(event: CardRevealEvent, onChoice: (Boolean) -> Unit) {
-    val reward = event.card.choiceReward
+    val reward = event.choiceReward
+    val custom = event.customCard
     AlertDialog(
         onDismissRequest = {},
-        title = { Text(event.customCard?.name ?: event.card.displayName()) },
+        title = { Text(if (event.effectIndex == null) custom?.name ?: event.card.displayName() else event.card.displayName()) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Подобрал: ${event.playerName}", color = AppColors.accent)
-                event.customCard?.flavor?.takeIf { it.isNotBlank() }?.let { Text(it, color = AppColors.textMuted) }
-                Text(CARD_DESCRIPTIONS.getValue(event.card))
+                if (event.effectIndex != null && custom != null) {
+                    Text("${custom.name} · эффект ${event.effectIndex + 1} из ${custom.effects.size}", color = AppColors.accent)
+                } else {
+                    Text("Подобрал: ${event.playerName}", color = AppColors.accent)
+                    custom?.flavor?.takeIf { it.isNotBlank() }?.let { Text(it, color = AppColors.textMuted) }
+                }
+                if (event.showsAllEffects && custom != null) {
+                    custom.effects.forEachIndexed { index, effect ->
+                        Text("${index + 1}. ${effect.displayName()}", fontWeight = FontWeight.Bold)
+                        Text(CARD_DESCRIPTIONS.getValue(effect))
+                    }
+                } else Text(CARD_DESCRIPTIONS.getValue(event.card))
                 if (event.card.isActive) Text("Карта в руке. Её можно разыграть в начале своего хода.")
             }
         },

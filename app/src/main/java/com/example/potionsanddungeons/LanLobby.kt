@@ -2,23 +2,23 @@ package com.example.potionsanddungeons
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -28,6 +28,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
 private enum class NetworkMode(val title: String) {
@@ -35,7 +36,10 @@ private enum class NetworkMode(val title: String) {
 }
 
 @Composable
-internal fun LanLobby(room: LanRoom, customCards: List<CustomCard>, onBack: () -> Unit) {
+internal fun LanLobby(
+    room: LanRoom, customCards: List<CustomCard>, layouts: List<BoardLayout>,
+    presetLibrary: PartyPresetLibrary, onBack: () -> Unit
+) {
     var mode by rememberSaveable { mutableStateOf(NetworkMode.WIFI) }
     val online = mode == NetworkMode.INTERNET
     val vpn = mode == NetworkMode.VPN
@@ -49,90 +53,138 @@ internal fun LanLobby(room: LanRoom, customCards: List<CustomCard>, onBack: () -
     var savedAvatar by remember { mutableStateOf(preferences.values()["crop"]) }
     val avatar = if (!room.connected) savedAvatar?.let { loadLanAvatar(it) } else null
     val canEnterRoom = !room.busy && (savedAvatar == null || avatar != null)
+    var rulesExpanded by rememberSaveable { mutableStateOf(false) }
+    var joining by rememberSaveable { mutableStateOf(false) }
+    var showDeckEditor by rememberSaveable { mutableStateOf(false) }
+    val deckProblem = room.boardOptions.deckProblem(room.dlcEnabled)
 
-    Column(Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        TextButton(onClick = onBack) { Text("Назад") }
-        Text("Сетевая игра", fontSize = AppFonts.title, fontWeight = FontWeight.Bold)
-        if (room.connected) {
-            if (room.hosting) {
-                if (!online) Text("Адрес комнаты: ${room.hostAddress}")
-                Text("Код: ${room.roomCode}", fontWeight = FontWeight.Bold)
-                if (online) {
-                    Text("Передай код друзьям. Можно играть из разных сетей.")
-                    if (defaultRelayEndpoint.isBlank()) Text("Сервер: ${endpoint.trim()}")
-                } else Text(if (vpn) "Передай VPN-адрес и код друзьям в той же VPN-сети."
-                    else "Передай адрес и код игрокам в той же сети.")
-            }
-            Text("Игроки (${room.names.size}/4)", fontWeight = FontWeight.Bold)
-            room.names.forEachIndexed { index, player ->
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Box(Modifier.size(32.dp).background(playerPalette[index % playerPalette.size], CircleShape),
-                        contentAlignment = Alignment.Center) {
-                        Text(player.take(1), color = AppColors.darkTextOnAccent)
-                        room.avatars[index]?.let { LanAvatarImage(it, Modifier.fillMaxSize()) }
+    if (showDeckEditor && room.connected && room.hosting) {
+        DeckEditorScreen(room.boardOptions, customCards, room.dlcEnabled,
+            onApply = { room.configureBoard(it); showDeckEditor = false }, onBack = { showDeckEditor = false })
+        return
+    }
+
+    MenuPage(if (room.connected) "Сетевая комната" else "Сетевая игра", onBack,
+        scroll = !room.connected, footer = {
+            if (room.connected && room.hosting) {
+                if (room.paused) Text(room.status, color = AppColors.accent)
+                else if (room.names.size < 2) Text("Ждём подключения игроков.", color = AppColors.textMuted)
+                if (deckProblem != null) Text(deckProblem, color = AppColors.accent, fontSize = AppFonts.hint)
+                Button(onClick = room::start, enabled = room.names.size >= 2 && !room.paused && deckProblem == null,
+                    modifier = Modifier.fillMaxWidth()) { Text("Начать игру") }
+            } else if (room.connected) {
+                Text("Ждём, когда ведущий начнёт игру.")
+            } else {
+                if (room.status.isNotEmpty()) Text(room.status, color = AppColors.textMuted)
+                Button(onClick = {
+                    if (joining) {
+                        if (online) room.joinOnline(endpoint, code, name, avatar)
+                        else network.request { room.join(address, code, name, viaVpn = vpn, avatar = avatar) }
+                    } else {
+                        if (online) room.hostOnline(endpoint, name, avatar)
+                        else network.request { room.host(name, vpnAddress.takeIf { vpn }, avatar) }
                     }
-                    Text(if (index == room.seat) "$player (ты)" else player)
+                }, enabled = canEnterRoom && if (joining) {
+                    code.length == 6 && (if (online) endpoint else address).isNotBlank()
+                } else {
+                    (!online || endpoint.isNotBlank()) && (!vpn || vpnAddress.isNotBlank())
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (joining) "Подключиться" else "Создать комнату")
                 }
             }
-            if (room.hosting) {
-                CustomRuleSwitch("Дополнительные зелья (DLC)", room.dlcEnabled, room::configureDlc)
-                BoardOptionsEditor(room.boardOptions, customCards, room::configureBoard)
-                Button(onClick = room::start, enabled = room.names.size >= 2 && !room.paused,
-                    modifier = Modifier.fillMaxWidth()) { Text("Начать сетевую игру") }
-            } else {
-                Text(if (room.dlcEnabled) "Дополнительные зелья (DLC) включены" else "Дополнительные зелья (DLC) выключены")
+        }
+    ) {
+        if (room.connected) {
+            MenuPanel("Код комнаты") {
+                SelectionContainer {
+                    Text(if (room.hosting) room.roomCode else code, color = AppColors.accent,
+                        fontSize = AppFonts.title, fontWeight = FontWeight.Bold)
+                }
+                if (room.hosting && (!online || defaultRelayEndpoint.isBlank())) {
+                    SelectionContainer { Text(if (online) endpoint.trim() else room.hostAddress, color = AppColors.textMuted) }
+                }
+            }
+            Text("Игроки · ${room.names.size}/4", fontWeight = FontWeight.SemiBold)
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                room.names.forEachIndexed { index, player ->
+                    Column(Modifier.width(72.dp), horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Box(Modifier.size(34.dp).background(playerPalette[index], CircleShape), contentAlignment = Alignment.Center) {
+                            Text(player.take(1), color = AppColors.darkTextOnAccent)
+                            room.avatars[index]?.let { LanAvatarImage(it, Modifier.fillMaxSize()) }
+                        }
+                        Text(if (index == room.seat) "$player (ты)" else player, fontSize = AppFonts.legend,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 val field = room.boardOptions
-                Text("Поле ${field.size}×${field.size} · ${field.potionPlacement.label}")
-                if (field.customCards.isNotEmpty()) Text("Карт ведущего в колоде: ${field.customCards.size}")
-                Text("Ждём, когда ведущий начнёт игру.")
+                BoardRulesSummary(field, room.dlcEnabled)
+                if (room.hosting) {
+                    OutlinedButton(onClick = { rulesExpanded = !rulesExpanded }, modifier = Modifier.fillMaxWidth()) {
+                        Text(if (rulesExpanded) "Правила партии ▴" else "Правила партии ▾")
+                    }
+                    if (rulesExpanded) {
+                        CustomRuleSwitch("Дополнительные зелья (DLC)", room.dlcEnabled, room::configureDlc)
+                        BoardOptionsEditor(field, customCards, layouts, room::configureBoard)
+                        OutlinedButton(onClick = { showDeckEditor = true }, modifier = Modifier.fillMaxWidth()) {
+                            Text(if (field.deckRecipe == null) "Настроить колоду" else "Изменить колоду")
+                        }
+                        PartyPresetControls(presetLibrary, room.dlcEnabled, CustomRules(board = field),
+                            onApply = { room.configureOptions(it.dlc, it.rules.board) }, network = true)
+                    }
+                }
             }
         } else {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                NetworkMode.entries.forEach { option ->
-                    FilterChip(selected = mode == option,
-                        onClick = { mode = option }, enabled = !room.busy,
-                        label = { Text(option.title) })
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FilterChip(selected = !joining, onClick = { joining = false }, enabled = !room.busy, label = { Text("Создать") })
+                FilterChip(selected = joining, onClick = { joining = true }, enabled = !room.busy, label = { Text("Подключиться") })
+            }
+            MenuPanel("Подключение") {
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    NetworkMode.entries.forEach { option ->
+                        FilterChip(selected = mode == option,
+                            onClick = { mode = option }, enabled = !room.busy,
+                            label = { Text(option.title) })
+                    }
+                }
+                Text(when (mode) {
+                    NetworkMode.WIFI -> "Подключитесь к одной сети Wi‑Fi."
+                    NetworkMode.VPN -> "Подключитесь к одной VPN-сети."
+                    NetworkMode.INTERNET -> "Можно играть из разных сетей."
+                }, color = AppColors.textMuted)
+                if (online && defaultRelayEndpoint.isBlank()) {
+                    OutlinedTextField(endpoint, { endpoint = it.take(253) }, label = { Text("Сервер (домен:порт)") },
+                        enabled = !room.busy, singleLine = true, modifier = Modifier.fillMaxWidth())
                 }
             }
-            Text(when (mode) {
-                NetworkMode.WIFI -> "Подключите 2–4 телефона к одной сети Wi‑Fi."
-                NetworkMode.VPN -> "Подключитесь к одной VPN-сети, например Tailscale."
-                NetworkMode.INTERNET -> "Онлайн-комната для 2–4 игроков."
-            })
-            if (online && defaultRelayEndpoint.isBlank()) {
-                OutlinedTextField(endpoint, { endpoint = it.take(253) }, label = { Text("Сервер (домен:порт)") },
-                    enabled = !room.busy, singleLine = true, modifier = Modifier.fillMaxWidth())
-            }
-            OutlinedTextField(name, { name = it.take(20) }, label = { Text("Твоё имя") },
-                singleLine = true, modifier = Modifier.fillMaxWidth())
-            LanAvatarPicker(savedAvatar, avatar, enabled = !room.busy) { value ->
-                preferences.put(mapOf("crop" to value))
-                savedAvatar = value
-            }
-            if (vpn) {
-                OutlinedTextField(vpnAddress, { vpnAddress = it.take(15) },
-                    label = { Text("Твой VPN IPv4 (для создания)") },
+            MenuPanel("Игрок") {
+                OutlinedTextField(name, { name = it.take(20) }, label = { Text("Твоё имя") },
                     singleLine = true, modifier = Modifier.fillMaxWidth())
+                LanAvatarPicker(savedAvatar, avatar, enabled = !room.busy) { value ->
+                    preferences.put(mapOf("crop" to value))
+                    savedAvatar = value
+                }
             }
-            Button(onClick = {
-                if (online) room.hostOnline(endpoint, name, avatar)
-                else network.request { room.host(name, vpnAddress.takeIf { vpn }, avatar) }
-            }, enabled = canEnterRoom && (!online || endpoint.isNotBlank()) && (!vpn || vpnAddress.isNotBlank()),
-                modifier = Modifier.fillMaxWidth()) { Text("Создать комнату") }
-            if (!online) {
-                OutlinedTextField(address, { address = it.take(15) }, label = { Text(if (vpn) "VPN IPv4 ведущего" else "IP-адрес ведущего") },
-                    singleLine = true, modifier = Modifier.fillMaxWidth())
+            if (joining) {
+                MenuPanel("Данные комнаты") {
+                    if (!online) {
+                        OutlinedTextField(address, { address = it.take(15) }, label = { Text(if (vpn) "VPN IPv4 ведущего" else "IP-адрес ведущего") },
+                            singleLine = true, modifier = Modifier.fillMaxWidth())
+                    }
+                    OutlinedTextField(code, { code = it.filter(Char::isDigit).take(6) }, label = { Text("Код комнаты") },
+                        singleLine = true, modifier = Modifier.fillMaxWidth())
+                }
+            } else {
+                if (vpn) MenuPanel("Адрес комнаты") {
+                    OutlinedTextField(vpnAddress, { vpnAddress = it.take(15) }, label = { Text("Твой VPN IPv4") },
+                        singleLine = true, modifier = Modifier.fillMaxWidth())
+                }
             }
-            OutlinedTextField(code, { code = it.filter(Char::isDigit).take(6) }, label = { Text("Код комнаты") },
-                singleLine = true, modifier = Modifier.fillMaxWidth())
-            OutlinedButton(onClick = {
-                if (online) room.joinOnline(endpoint, code, name, avatar)
-                else network.request { room.join(address, code, name, viaVpn = vpn, avatar = avatar) }
-            }, enabled = canEnterRoom && code.length == 6 && (if (online) endpoint else address).isNotBlank(),
-                modifier = Modifier.fillMaxWidth()) { Text("Подключиться") }
         }
         if (!online && network.denied) Text("Для сетевой игры разреши доступ к локальной сети в настройках Android.")
-        if (room.status.isNotEmpty()) Text(room.status, color = AppColors.textMuted)
     }
 }

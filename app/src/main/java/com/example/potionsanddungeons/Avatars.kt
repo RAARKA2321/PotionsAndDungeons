@@ -2,6 +2,7 @@ package com.example.potionsanddungeons
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -197,6 +198,7 @@ internal fun AvatarSettings(onDismiss: () -> Unit, colors: DiceColors, onColorsC
     var pendingCrop by rememberSaveable { mutableStateOf<String?>(null) }
     val pickPhoto = rememberAvatarPicker { path -> pendingCrop = AvatarCrop(path).encode() }
     val retainPhoto = rememberAvatarPermission()
+    val updates = LocalUpdates.current
     pendingCrop?.let { saved ->
         AvatarCropDialog(AvatarCrop.decode(saved), onDismiss = { pendingCrop = null }) { crop ->
             runCatching {
@@ -207,42 +209,52 @@ internal fun AvatarSettings(onDismiss: () -> Unit, colors: DiceColors, onColorsC
             pendingCrop = null
         }
     }
-    Column(Modifier.fillMaxSize().padding(horizontal=24.dp)) {
-        TextButton(onClick=onDismiss) { Text("Назад") }
-        Text("Оформление",fontSize=AppFonts.title,fontWeight=FontWeight.Bold)
-        Spacer(Modifier.height(16.dp))
-        Row(horizontalArrangement=Arrangement.spacedBy(12.dp)) {
-            FilterChip(selected=section==0,onClick={section=0},label={Text("Аватарки")})
-            FilterChip(selected=section==1,onClick={section=1},label={Text("Кубики")})
+    MenuPage("Настройки", onDismiss, scroll = false, footer = {
+        Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Готово") }
+    }) {
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(selected = section == 0, onClick = { section = 0 }, label = { Text("Аватарки") })
+            FilterChip(selected = section == 1, onClick = { section = 1 }, label = { Text("Кубики") })
+            if (updates != null) {
+                FilterChip(selected = section == 2, onClick = { section = 2 },
+                    label = { Text(if (updates.hasUpdate) "Обновления · есть новое" else "Обновления") })
+            }
         }
-        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
-            verticalArrangement=Arrangement.spacedBy(12.dp)) {
-            if (section==0) {
-            (0..4).forEach { index ->
-                val key = if (index == 4) "boss" else "player$index"
-                Row(Modifier.fillMaxWidth().background(AppColors.panelBg,RoundedCornerShape(16.dp)).padding(16.dp),
-                    verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(12.dp)) {
-                    Box(Modifier.size(56.dp).background(if(index==4) AppColors.bossAttackZone else playerPalette[index],CircleShape),
-                        contentAlignment=Alignment.Center) {
-                        Text(if(index==4) "👹" else "${index+1}")
-                        AvatarImage(key, Modifier.fillMaxSize())
-                    }
-                    val saved = LocalAvatars.current[key]
-                    Column(Modifier.weight(1f)) {
-                        Text(if (index == 4) "Босс" else "Игрок ${index+1}",fontWeight=FontWeight.Bold)
-                        TextButton(onClick = { selected = key; pickPhoto() }) { Text("Выбрать фото") }
-                        if (saved != null) {
-                            TextButton(onClick = { selected = key; pendingCrop = saved }) { Text("Настроить кадр") }
+        key(section) {
+            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (section == 0) {
+                    (0..4).forEach { index ->
+                        val isBoss = index == 4
+                        val avatarKey = if (isBoss) "boss" else "player$index"
+                        MenuPanel {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Box(Modifier.size(52.dp).background(if (isBoss) AppColors.bossAttackZone else playerPalette[index], CircleShape),
+                                    contentAlignment = Alignment.Center) {
+                                    Text(if (isBoss) "👹" else "${index + 1}", color = AppColors.darkTextOnAccent)
+                                    AvatarImage(avatarKey, Modifier.fillMaxSize())
+                                }
+                                val saved = LocalAvatars.current[avatarKey]
+                                Column(Modifier.weight(1f)) {
+                                    Text(if (isBoss) "Босс" else "Игрок ${index + 1}", fontWeight = FontWeight.Bold)
+                                    TextButton(onClick = { selected = avatarKey; pickPhoto() }) {
+                                        Text(if (saved == null) "Выбрать фото" else "Сменить фото")
+                                    }
+                                    if (saved != null) {
+                                        TextButton(onClick = { selected = avatarKey; pendingCrop = saved }) { Text("Настроить кадр") }
+                                        TextButton(onClick = { onChanged(avatarKey, null) }) { Text("Сбросить") }
+                                    }
+                                }
+                            }
                         }
                     }
-                    if (saved != null) TextButton(onClick = { onChanged(key, null) }) { Text("Сбросить") }
+                    error?.let { Text(it, color = AppColors.accent) }
+                } else if (section == 2 && updates != null) {
+                    UpdateSettings(updates)
+                } else {
+                    DiceColorSettings(colors, onColorsChanged)
                 }
             }
-            error?.let { Text(it) }
-            } else {
-            DiceColorSettings(colors, onColorsChanged)
-            }
         }
-        Button(onClick=onDismiss,modifier=Modifier.fillMaxWidth().padding(vertical=12.dp)) { Text("Готово") }
     }
 }

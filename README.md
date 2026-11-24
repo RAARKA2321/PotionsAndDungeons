@@ -18,7 +18,17 @@
 
 ```sh
 bash gradlew -p desktop installDist -PdesktopTarget=windows
-bash desktop/pack-windows.sh /path/to/windows-jre PotionsAndDungeons-Windows-x64.zip
+bash desktop/pack-windows.sh /path/to/windows-jre PotionsAndDungeons-1.7.0-Windows-x64.zip
+```
+
+## Обновления
+
+В меню **Настройки → Обновления** можно проверить версию и включить автоматическое скачивание. В переносимой сборке Windows скачанное обновление применяется при следующем запуске через `PotionsAndDungeons.exe`. На Android установка APK подтверждается в системном окне.
+
+Для GitHub Releases используй тег `vX.Y.Z` и файлы `PotionsAndDungeons-X.Y.Z.apk` и `PotionsAndDungeons-X.Y.Z-Windows-x64.zip`. APK должен иметь повышенный `versionCode` и ту же подпись, что предыдущий выпуск. Вместе с ними можно прикрепить `update-manifest.json`, чтобы проверка работала и при ограничении доступа к GitHub API.
+
+```powershell
+.\scripts\New-UpdateManifest.ps1 -Version 1.7.0
 ```
 
 ## Игра через VPN
